@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Icon from '@/components/Icon.vue';
+import BbsSelect from '@/components/BbsSelect.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import SummaryOnlyNotice from '@/components/SummaryOnlyNotice.vue';
@@ -171,6 +172,14 @@ const sceneOptions = computed(() =>
     .sort((a, b) => a.path.join('/').localeCompare(b.path.join('/')))
     .map(s => ({ id: s.id, name: s.name, depth: s.path.length - 1 })),
 );
+
+/** 转成 BbsSelect 选项:层级仍用全角空格缩进(自绘菜单里同样保留前导空白,不像 HTML 会折叠) */
+function parentOptions(list: { id: string; name: string; depth: number }[]) {
+  return [
+    { value: '', label: '（顶级地点）' },
+    ...list.map(o => ({ value: o.id, label: '　'.repeat(o.depth) + o.name })),
+  ];
+}
 
 /* —— 新增地点(弹窗):选上级(已有路径 / 顶级)+ 填新名 + 描述 —— */
 const composerOpen = ref(false);
@@ -373,15 +382,10 @@ function confirmTravel() {
           <span class="bbs-modal-title">添加地点</span>
           <button class="bbs-item-act" type="button" title="关闭" @click="closeComposer"><Icon name="close" /></button>
         </header>
-        <label class="bbs-modal-field">
+        <div class="bbs-modal-field">
           <span class="bbs-modal-label">上级地点(从已有地点里选,或设为顶级)</span>
-          <select v-model="newParentId" class="bbs-input">
-            <option value="">（顶级地点）</option>
-            <option v-for="o in sceneOptions" :key="o.id" :value="o.id">
-              {{ '　'.repeat(o.depth) }}{{ o.name }}
-            </option>
-          </select>
-        </label>
+          <BbsSelect v-model="newParentId" :options="parentOptions(sceneOptions)" aria-label="上级地点" />
+        </div>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">名称</span>
           <input ref="nameInput" v-model="newName" class="bbs-input" type="text" placeholder="新地点名" @keydown.enter="addScene" />
@@ -409,15 +413,10 @@ function confirmTravel() {
           <span class="bbs-modal-label">名称</span>
           <input v-model="editing.name" class="bbs-input" type="text" placeholder="地点名" />
         </label>
-        <label class="bbs-modal-field">
+        <div class="bbs-modal-field">
           <span class="bbs-modal-label">上级地点(改这里会连同下属一起移动)</span>
-          <select v-model="editing.parentId" class="bbs-input">
-            <option value="">（顶级地点）</option>
-            <option v-for="o in editParentOptions" :key="o.id" :value="o.id">
-              {{ '　'.repeat(o.depth) }}{{ o.name }}
-            </option>
-          </select>
-        </label>
+          <BbsSelect v-model="editing.parentId" :options="parentOptions(editParentOptions)" aria-label="上级地点" />
+        </div>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">描述(必填)</span>
           <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="这地方是什么、有何特征"></textarea>

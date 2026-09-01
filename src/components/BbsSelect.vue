@@ -1,4 +1,4 @@
-<script setup lang="ts">
+<script setup lang="ts" generic="T extends string">
 import Icon from '@/components/Icon.vue';
 import { modalHost } from '@/state/ui';
 import { computed, onBeforeUnmount, ref } from 'vue';
@@ -8,6 +8,9 @@ import { computed, onBeforeUnmount, ref } from 'vue';
  * 选项可带图标。原生 select 的弹出层由系统渲染,主题变量管不到,故自绘。
  * (与柏宝绘 BbiSelect.vue 同源,类名换 bbs- 前缀。)
  *
+ * 泛型 T:调用方的值常是字面量联合(如 Verbosity = 'detailed' | 'concise'),
+ * 写死 string 会让 v-model 回写类型不兼容;泛型下选项与绑定值同类型,拼错值即报错。
+ *
  * 菜单为什么 Teleport 到 modalHost 而不是就地绝对定位:
  * 设置项都在 Collapsible(overflow:hidden)与 .bbs-body 滚动容器里,就地定位会被裁剪。
  * modalHost 是 .bbs-root 直接子级,菜单用视口级 fixed 定位,
@@ -16,12 +19,12 @@ import { computed, onBeforeUnmount, ref } from 'vue';
  * 交互:点外部 / Esc / 滚动 / 缩放关闭;↑↓ 移动高亮,Enter/Space 选中,Home/End 跳首尾。
  */
 const props = defineProps<{
-  modelValue: string;
-  options: { value: string; label: string; icon?: string }[];
+  modelValue: T;
+  options: { value: T; label: string; icon?: string }[];
   /** 无障碍名称(行标题是纯文本 span,与控件无 label 关联,靠它补上) */
   ariaLabel?: string;
 }>();
-const emit = defineEmits<{ (e: 'update:modelValue', v: string): void }>();
+const emit = defineEmits<{ (e: 'update:modelValue', v: T): void }>();
 
 const open = ref(false);
 const trigger = ref<HTMLElement | null>(null);
@@ -84,7 +87,7 @@ function toggle() {
   else openMenu();
 }
 
-function pick(option: { value: string }) {
+function pick(option: { value: T }) {
   emit('update:modelValue', option.value);
   closeMenu(true);
 }
@@ -140,8 +143,9 @@ onBeforeUnmount(() => closeMenu());
 </script>
 
 <template>
-  <!-- 根类名不能叫 bbs-select:base.css 里那个类是给美化原生 <select> 用的,
-       带背景图三角 + padding-right,撞上会在触发器右边多画一个三角 -->
+  <!-- 根类名叫 bbs-select-box 不叫 bbs-select:后者曾是美化原生 <select> 的类
+       (带背景图三角 + padding-right),现已随最后一个原生 select 一并删除,
+       但外部若再引入同名类仍会在触发器右边多画一个三角,故保持区分 -->
   <div class="bbs-select-box">
     <button
       ref="trigger"

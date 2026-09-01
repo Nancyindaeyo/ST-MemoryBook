@@ -8,6 +8,7 @@
  * 只有对象/数组才向下递归成缩进子块。
  */
 import Icon from '@/components/Icon.vue';
+import BbsSelect from '@/components/BbsSelect.vue';
 import type { JsonValue } from '@/memory/types';
 import { computed } from 'vue';
 
@@ -15,12 +16,12 @@ const props = defineProps<{ modelValue: JsonValue }>();
 const emit = defineEmits<{ 'update:modelValue': [JsonValue] }>();
 
 type JType = 'object' | 'array' | 'string' | 'number' | 'boolean';
-const TYPE_OPTS: { v: JType; label: string }[] = [
-  { v: 'string', label: '文本' },
-  { v: 'number', label: '数值' },
-  { v: 'boolean', label: '真假' },
-  { v: 'object', label: '对象' },
-  { v: 'array', label: '数组' },
+const TYPE_OPTS: { value: JType; label: string }[] = [
+  { value: 'string', label: '文本' },
+  { value: 'number', label: '数值' },
+  { value: 'boolean', label: '真假' },
+  { value: 'object', label: '对象' },
+  { value: 'array', label: '数组' },
 ];
 
 function typeOf(v: JsonValue): JType {
@@ -47,8 +48,8 @@ const asArray = computed(() => (Array.isArray(props.modelValue) ? props.modelVal
 function setObjChild(key: string, v: JsonValue) {
   emit('update:modelValue', { ...asObject.value, [key]: v });
 }
-function changeObjType(key: string, ev: Event) {
-  setObjChild(key, blankOf((ev.target as HTMLSelectElement).value as JType));
+function changeObjType(key: string, t: JType) {
+  setObjChild(key, blankOf(t));
 }
 function renameKey(oldKey: string, ev: Event) {
   const newKey = (ev.target as HTMLInputElement).value.trim();
@@ -77,8 +78,8 @@ function setArrItem(idx: number, v: JsonValue) {
   a[idx] = v;
   emit('update:modelValue', a);
 }
-function changeArrType(idx: number, ev: Event) {
-  setArrItem(idx, blankOf((ev.target as HTMLSelectElement).value as JType));
+function changeArrType(idx: number, t: JType) {
+  setArrItem(idx, blankOf(t));
 }
 function addArrItem() { emit('update:modelValue', [...asArray.value, '']); }
 function removeArrItem(idx: number) {
@@ -101,9 +102,13 @@ function numVal(ev: Event): JsonValue {
     <div v-for="k in objKeys" :key="k" class="bbs-jte-field">
       <div class="bbs-jte-row">
         <input class="bbs-input bbs-jte-key" type="text" :value="k" placeholder="字段名" @change="renameKey(k, $event)" />
-        <select class="bbs-input bbs-jte-type" :value="typeOf(asObject[k])" @change="changeObjType(k, $event)">
-          <option v-for="t in TYPE_OPTS" :key="t.v" :value="t.v">{{ t.label }}</option>
-        </select>
+        <BbsSelect
+          class="bbs-jte-type"
+          :model-value="typeOf(asObject[k])"
+          :options="TYPE_OPTS"
+          aria-label="字段类型"
+          @update:model-value="t => changeObjType(k, t)"
+        />
         <!-- 标量值就地编辑;容器则本行只留类型,值在下方缩进块 -->
         <input v-if="typeOf(asObject[k]) === 'string'" class="bbs-input bbs-jte-val" type="text" :value="asObject[k] as string" placeholder="值" @input="setObjChild(k, strVal($event))" />
         <input v-else-if="typeOf(asObject[k]) === 'number'" class="bbs-input bbs-jte-val" type="number" :value="asObject[k] as number" @input="setObjChild(k, numVal($event))" />
@@ -123,9 +128,13 @@ function numVal(ev: Event): JsonValue {
     <div v-for="(item, idx) in asArray" :key="idx" class="bbs-jte-field">
       <div class="bbs-jte-row">
         <span class="bbs-jte-idx">#{{ idx }}</span>
-        <select class="bbs-input bbs-jte-type" :value="typeOf(item)" @change="changeArrType(idx, $event)">
-          <option v-for="t in TYPE_OPTS" :key="t.v" :value="t.v">{{ t.label }}</option>
-        </select>
+        <BbsSelect
+          class="bbs-jte-type"
+          :model-value="typeOf(item)"
+          :options="TYPE_OPTS"
+          aria-label="项类型"
+          @update:model-value="t => changeArrType(idx, t)"
+        />
         <input v-if="typeOf(item) === 'string'" class="bbs-input bbs-jte-val" type="text" :value="item as string" placeholder="值" @input="setArrItem(idx, strVal($event))" />
         <input v-else-if="typeOf(item) === 'number'" class="bbs-input bbs-jte-val" type="number" :value="item as number" @input="setArrItem(idx, numVal($event))" />
         <button v-else-if="typeOf(item) === 'boolean'" class="bbs-jte-bool" :class="{ on: item === true }" type="button" @click="setArrItem(idx, item !== true)">{{ item === true ? '是' : '否' }}</button>
@@ -168,19 +177,15 @@ function numVal(ev: Event): JsonValue {
   color: var(--bbs-ink-muted);
   min-width: 30px;
 }
-/* 类型选择:自绘小三角(与插件其它 select 同款 SVG),右内边距留够、不贴边 */
-.bbs-jte-type {
+/* 类型选择:自绘下拉(BbsSelect),窄一档以配合紧凑行。
+   类名落在组件根 .bbs-select-box 上,带父级压过它自带的 width:100%(同特异度会看打包顺序,不可靠) */
+.bbs-jte-row .bbs-jte-type {
   flex: 0 0 auto;
   width: 74px;
-  padding: 6px 26px 6px 10px;
+}
+.bbs-jte-type :deep(.bbs-select-trigger) {
+  padding: 6px 8px;
   font-size: 12px;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9.5 12 15.5 18 9.5'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 14px;
 }
 .bbs-jte-val {
   flex: 1 1 auto;

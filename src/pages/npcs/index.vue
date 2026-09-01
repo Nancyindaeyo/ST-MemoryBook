@@ -446,20 +446,21 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
-                <span v-if="n.title" class="bbs-npc-flag">{{ n.title }}</span>
                 <span class="bbs-npc-acts">
                   <button class="bbs-item-act bbs-npc-star active" type="button" title="主要角色 · 点击取消" @click="toggleImportant(n)"><Icon name="star" /></button>
                   <button class="bbs-item-act" type="button" title="编辑" @click="openEdit(n)"><Icon name="edit" /></button>
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.relation || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
+              <dl v-if="n.title || n.relation || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
+                <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
+                  <dt>所在</dt>
+                  <dd :class="{ 'is-follow': n.follow }">{{ n.follow ? '随主角同行' : n.location }}</dd>
+                </div>
                 <div v-if="n.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ n.outfit }}</dd></div>
                 <div v-if="n.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ n.condition }}</dd></div>
-                <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
-                  <dt>所在</dt><dd>{{ n.follow ? '随主角同行' : n.location }}</dd>
-                </div>
               </dl>
               <p v-else class="bbs-npc-mainhint">尚无状态记录 —— 编辑可补充当前着装 / 状态 / 所在。</p>
             </div>
@@ -482,8 +483,6 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
-                <span v-if="n.follow" class="bbs-npc-flag is-follow"><Icon name="pin" />随行</span>
-                <span v-else-if="n.location" class="bbs-npc-flag"><Icon name="scenes" />{{ n.location }}</span>
                 <span class="bbs-npc-acts">
                   <button
                     class="bbs-item-act bbs-npc-star"
@@ -506,9 +505,13 @@ function confirmRemove() {
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.title || n.relation || n.ties || n.personality || n.desc || n.outfit || n.condition" class="bbs-npc-fields">
+              <dl v-if="n.title || n.relation || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
+                  <dt>所在</dt>
+                  <dd :class="{ 'is-follow': n.follow }">{{ n.follow ? '随主角同行' : n.location }}</dd>
+                </div>
                 <div v-if="n.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ n.outfit }}</dd></div>
                 <div v-if="n.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ n.condition }}</dd></div>
                 <div v-if="n.personality" class="bbs-npc-field f-trait"><dt>性格</dt><dd>{{ n.personality }}</dd></div>
@@ -535,7 +538,6 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
-                <span v-if="n.location" class="bbs-npc-flag"><Icon name="scenes" />{{ n.location }}</span>
                 <span class="bbs-npc-acts">
                   <button
                     class="bbs-item-act bbs-npc-star"
@@ -557,9 +559,10 @@ function confirmRemove() {
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.title || n.relation || n.personality" class="bbs-npc-fields">
+              <dl v-if="n.title || n.relation || n.personality || n.location" class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="n.location" class="bbs-npc-field f-loc"><dt>所在</dt><dd>{{ n.location }}</dd></div>
                 <div v-if="n.personality" class="bbs-npc-field f-trait"><dt>性格</dt><dd>{{ n.personality }}</dd></div>
               </dl>
             </div>
@@ -582,8 +585,6 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
-                <span v-if="n.location" class="bbs-npc-flag"><Icon name="scenes" />{{ n.location }}</span>
-                <span v-else class="bbs-npc-flag is-nowhere">所在不明</span>
                 <span class="bbs-npc-acts">
                   <button
                     class="bbs-item-act bbs-npc-star"
@@ -605,9 +606,14 @@ function confirmRemove() {
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.title || n.relation" class="bbs-npc-fields">
+              <dl class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div class="bbs-npc-field f-loc">
+                  <dt>所在</dt>
+                  <dd v-if="n.location">{{ n.location }}</dd>
+                  <dd v-else class="is-nowhere">所在不明</dd>
+                </div>
               </dl>
             </div>
           </article>
@@ -989,8 +995,8 @@ function confirmRemove() {
   flex-direction: column;
   gap: 4px;
 }
-/* 头行:名字 + 一枚状态标(随行/所在地)+ 操作区。名字占自然宽,状态标吃剩余宽并截断,
-   操作区固定不被挤。身份不在这行——长身份单独成段,不再挤乱头行。 */
+/* 头行:名字 + 性别/年龄 + 操作区。只放定长内容——所在地、身份这类变长文本一律下沉到
+   下方字段表,否则它们会吃光行宽、把名字挤成一两个字。 */
 .bbs-npc-head {
   display: flex;
   align-items: center;
@@ -1021,25 +1027,6 @@ function confirmRemove() {
   align-items: center;
   gap: 2px;
   margin-left: auto;
-}
-.bbs-npc-flag {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--bbs-ink-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.bbs-npc-flag.is-follow {
-  color: var(--bbs-accent);
-  flex-shrink: 0;
-}
-.bbs-npc-flag.is-nowhere {
-  font-style: italic;
-  opacity: 0.7;
 }
 
 /* —— 字段表:身份/性格/外貌统一成「彩色类别标签 + 内容」的对齐行。
@@ -1113,7 +1100,24 @@ function confirmRemove() {
   color: var(--bbs-ink);
 }
 /* 人际(与其他角色):中性标签(档案层次要细节) */
-/* 外貌 / 所在:中性标签(沿用默认),作次要细节 */
+/* 外貌:中性标签(沿用默认),作次要细节 */
+/* 所在:青瓷描边——位置是「他现在在哪」,属即时层,但比着装/状态弱一档,故只染字不填底 */
+.bbs-npc-field.f-loc dt {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--bbs-accent) 35%, transparent);
+  color: var(--bbs-accent);
+  /* 描边占 2px,减内距让这枚标签与其他填底标签仍同宽同高 */
+  padding: 0;
+}
+/* 随行中:所在内容点亮强调色,替代原头行那枚「随行」标 */
+.bbs-npc-field.f-loc dd.is-follow {
+  color: var(--bbs-accent);
+}
+/* 所在不明:虚化斜体,与「不在场」组的压暗基调一致 */
+.bbs-npc-field.f-loc dd.is-nowhere {
+  font-style: italic;
+  opacity: 0.7;
+}
 
 /* 主要角色无状态时的占位提示:引导补录当前状态,避免空卡 */
 .bbs-npc-mainhint {
@@ -1353,5 +1357,33 @@ function confirmRemove() {
 }
 .bbs-item-act.active {
   color: var(--bbs-accent);
+}
+
+/* ============ 窄屏:生活细节卡的重排 ============ */
+@media (max-width: 640px) {
+  /* 生活小档案:主题/时效标签与操作钮同占顶行,正文整行排在下方。
+     main 改 display:contents,让文本/标签直接参与卡片 flex 排序,无需改模板结构 */
+  .bbs-life {
+    flex-wrap: wrap;
+  }
+  .bbs-life-main {
+    display: contents;
+  }
+  .bbs-life-meta {
+    order: 1;
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-top: 0;
+    align-self: center;
+  }
+  .bbs-life .bbs-npc-acts {
+    order: 2;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+  .bbs-life-text {
+    order: 3;
+    flex-basis: 100%;
+  }
 }
 </style>

@@ -1661,6 +1661,7 @@ provide(SUMMARY_CTX, {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0; /* 允许本项在 wrap 容器内收缩,收缩额度由下面两个子项分配 */
 }
 .bbs-state-key {
   font-size: 11px;
@@ -1668,10 +1669,16 @@ provide(SUMMARY_CTX, {
   border: 1px solid var(--bbs-accent);
   border-radius: var(--bbs-radius-pill);
   padding: 1px 8px;
+  /* 药丸固宽:长地名会把整项撑超宽,默认 flex-shrink:1 会连这枚标签一起压扁
+     (内距被吃、「地点」二字竖排)。让它不参与收缩,超出的宽度全由右侧值消化 */
+  flex: none;
+  white-space: nowrap;
 }
 .bbs-state-val {
   font-size: 14px;
   color: var(--bbs-ink);
+  min-width: 0;
+  word-break: break-word;
 }
 
 .bbs-error {

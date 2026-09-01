@@ -5,7 +5,7 @@ import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { fetchModels, testChannel } from '@/api/client';
-import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, type ApiChannel } from '@/api/settings';
+import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type Verbosity } from '@/api/settings';
 import { getContext } from '@/st/context';
 import {
   JAILBREAK_PROMPT,
@@ -50,6 +50,17 @@ const REASONING_EFFORT_OPTIONS = [
   { value: 'xhigh', label: 'xhigh' },
   { value: 'max', label: 'max' },
 ];
+
+const VERBOSITY_OPTIONS: { value: Verbosity; label: string }[] = [
+  { value: 'detailed', label: '详细' },
+  { value: 'concise', label: '精简' },
+];
+
+/** 任务指派下拉:空串 = 跟随主 API,其余为副渠道 id(未命名渠道给个占位名,免空白选项) */
+const channelOptions = computed(() => [
+  { value: '', label: '跟随主 API' },
+  ...apiSettings.channels.map(c => ({ value: c.id, label: c.name || '未命名渠道' })),
+]);
 
 /* —— 悬浮球自定义图标:选图 → 压缩上传到 ST 服务器 → 存路径串(跨设备同步) —— */
 const orbFileInput = ref<HTMLInputElement | null>(null);
@@ -890,20 +901,14 @@ function exportPublicApiDocument() {
       <Collapsible title="副 API" :open="false">
         <!-- 任务指派 -->
         <div class="bbs-field bbs-assign">
-          <label class="bbs-assign-row">
+          <div class="bbs-assign-row">
             <span class="bbs-field-label">摘要使用</span>
-            <select v-model="apiSettings.assignments.summary" class="bbs-input bbs-select">
-              <option value="">跟随主 API</option>
-              <option v-for="c in apiSettings.channels" :key="c.id" :value="c.id">{{ c.name }}</option>
-            </select>
-          </label>
-          <label class="bbs-assign-row">
+            <BbsSelect v-model="apiSettings.assignments.summary" :options="channelOptions" class="bbs-assign-select" aria-label="摘要使用的渠道" />
+          </div>
+          <div class="bbs-assign-row">
             <span class="bbs-field-label">总结使用</span>
-            <select v-model="apiSettings.assignments.resummary" class="bbs-input bbs-select">
-              <option value="">跟随主 API</option>
-              <option v-for="c in apiSettings.channels" :key="c.id" :value="c.id">{{ c.name }}</option>
-            </select>
-          </label>
+            <BbsSelect v-model="apiSettings.assignments.resummary" :options="channelOptions" class="bbs-assign-select" aria-label="总结使用的渠道" />
+          </div>
         </div>
         <p class="bbs-field-hint">不指派渠道时跟随主 API:直接借用你主界面当前正在用的 API(聊天补全/文本补全)执行摘要,无需额外配置。想用不同模型再在下方建副渠道指派。</p>
 
@@ -935,13 +940,10 @@ function exportPublicApiDocument() {
           <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox" />
         </label>
         <p class="bbs-field-hint">开启后自动摘要并隐藏旧楼,同时启用正文时间标签(剧情时间锚点)与积压拦截(漏摘时拦截发送、提示补摘)。</p>
-        <label class="bbs-num-row">
+        <div class="bbs-num-row">
           <span class="bbs-field-label">字数档位</span>
-          <select v-model="apiSettings.verbosity" class="bbs-input bbs-select bbs-select-narrow">
-            <option value="detailed">详细</option>
-            <option value="concise">精简</option>
-          </select>
-        </label>
+          <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />
+        </div>
         <p class="bbs-field-hint">一键调节摘要/总结/二次总结的目标字数。详细=信息全(摘要150-300、总结300-500字)；精简=省token(摘要80-150、总结150-300字)。仅影响内置提示词,自定义模板不受影响。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">保留最近 AI 消息数</span>
@@ -2170,17 +2172,15 @@ function exportPublicApiDocument() {
   justify-content: space-between;
   gap: 12px;
 }
-.bbs-select {
-  max-width: 60%;
+/* 指派下拉:占右半区(渠道名可能长,给足宽度再截断),小一号字与其它设置行一致。
+   带上父级选择器是为了压过 BbsSelect 根节点自带的 width:100%——两者同特异度时靠
+   样式表先后决定胜负,那取决于打包顺序,不可靠 */
+.bbs-assign-row .bbs-assign-select {
+  flex: 0 1 60%;
+  min-width: 0;
+}
+.bbs-assign-select :deep(.bbs-select-trigger) {
   font-size: 12px;
-  /* 去掉原生右侧大留白的下拉箭头,换一枚紧贴文字的自绘小三角(右内边距随之收紧) */
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 26px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9.5 12 15.5 18 9.5'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 14px;
 }
 /* —— 模型可搜索 combobox —— */
 .bbs-combo {
@@ -2483,11 +2483,15 @@ function exportPublicApiDocument() {
 .bbs-vec-io + .bbs-switch-row {
   margin-top: 6px;
 }
-/* 短选项下拉(如字数档位):贴合文字的窄宽,和右侧数字框对齐,不再撑满半行 */
-.bbs-select-narrow {
+/* 短选项下拉(如字数档位):贴合文字的窄宽,和右侧数字框对齐,不再撑满半行。
+   同上,带父级压过组件根的 width:100% */
+.bbs-num-row .bbs-select-narrow {
   width: auto;
   min-width: 65px;
   max-width: 150px;
+}
+.bbs-select-narrow :deep(.bbs-select-trigger) {
+  font-size: 12px;
 }
 
 /* —— 总开关主控卡 —— */
