@@ -940,6 +940,11 @@ function exportPublicApiDocument() {
           <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox" />
         </label>
         <p class="bbs-field-hint">开启后自动摘要并隐藏旧楼,同时启用正文时间标签(剧情时间锚点)与积压拦截(漏摘时拦截发送、提示补摘)。</p>
+        <label class="bbs-switch-row">
+          <span class="bbs-field-label">只总结 AI 输出</span>
+          <input v-model="apiSettings.summarizeAiOnly" type="checkbox" class="bbs-checkbox" />
+        </label>
+        <p class="bbs-field-hint">开启后,喂给摘要/总结模型的正文只含 AI 楼,不含 user 楼。覆盖窗口、物品/角色/地点等状态派生、世界书关键词激活仍会读取 user 楼,避免漏算。</p>
         <div class="bbs-num-row">
           <span class="bbs-field-label">字数档位</span>
           <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />

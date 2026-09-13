@@ -4,7 +4,7 @@ import { fmtItemLogInline } from './prompts';
 import { mergeLifeDetailsOp, normalizeLifeDetailText } from './lifeDetails';
 import { mergeProtagonistDelta } from './protagonist';
 import { memory, recomputeDerived, saveMemory, scheduleLeafFlush } from './store';
-import { readItemsTagText, writeItemLogTag, writeVarLogTag } from './timeTag';
+import { cleanBody, readItemsTagText, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { createEmptyMemory } from './types';
@@ -679,6 +679,24 @@ export function leafValid(m: STMessage | undefined): boolean {
   if (!leaf || !leaf.id || !leaf.delta) return false;
   if (!m) return false;
   return leafSwipe(leaf) === msgSwipe(m);
+}
+
+/** 清洗后正文指纹(FNV-1a)。物品/变量旁注不计入,避免改旁注误报过期。 */
+export function leafBodyHash(mes: string | undefined): string {
+  const text = cleanBody(String(mes ?? ''));
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/** 有效叶子的正文相对生成时已变。旧叶子没有 srcHash 时不提示。 */
+export function leafBodyOutdated(m: STMessage | undefined): boolean {
+  const leaf = getLeaf(m);
+  if (!leaf?.srcHash || !leafValid(m)) return false;
+  return leaf.srcHash !== leafBodyHash(m?.mes);
 }
 
 /* ============ 重放引擎 ============ */

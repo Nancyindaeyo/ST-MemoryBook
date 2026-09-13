@@ -427,7 +427,7 @@ ${RULE_SUMMARY_WRITE}
  * 用于「批量补摘」——把固定上下文(破限/设定/状态/规则)分摊到 K 楼,省 token + 减请求数。
  * 规则段与单楼 SUMMARY_PROMPT 同源(RULE_*),仅正文分段、输出形态、连续性说明不同。
  *
- * 时间:批量统一走「让 AI 补 timeStart/timeEnd」口径(块内多楼难以逐楼对齐标签,
+ * 时间/地点:批量走 timeStart/timeEnd/location 口径(块内多楼难以逐楼对齐标签,
  * 落叶时仍由代码优先读各楼正文标签兜底,见 engine 的 applyLeafForFloor)。
  */
 export const BATCH_SUMMARY_PROMPT = `你是严谨的剧情记忆整理员。下面是【连续的多个楼层】,请**严格按楼层先后顺序逐楼**各产出一份摘要,合并成一个 JSON 对象输出。
@@ -446,8 +446,8 @@ export const BATCH_SUMMARY_PROMPT = `你是严谨的剧情记忆整理员。下�
 {{content}}
 
 ═══ 【批量任务说明(关键)】 ═══
-- 本次只做两件事:为每楼写**摘要正文**(summary)+ 标注**起止时间**(timeStart/timeEnd)。
-  **不要**输出物品、计划、悬念、地点等任何其它字段——批量补摘只管摘要与时间,其余交给后续处理。
+- 本次只做三件事:为每楼写**摘要正文**(summary)+ 标注**起止时间**(timeStart/timeEnd)+ 本楼结束时的**地点**(location,可选 locationPath)。
+  **不要**输出物品、计划、悬念等其它字段——批量补摘不管账本,其余交给后续处理。
 - 你要为这 {{floor_count}} 个楼层【各自】产出一个元素,**严格按上面第 1..{{floor_count}} 楼的先后顺序**一一对应,顺序绝不能打乱。
 - 每楼只摘**该楼正文**;时间按剧情自然推进,后面楼的时间不早于前面楼(见【时间规则】)。
 
@@ -459,12 +459,14 @@ export const BATCH_SUMMARY_PROMPT = `你是严谨的剧情记忆整理员。下�
       "n": 1,
       "summary": "第 1 楼剧情摘要,见下方【摘要撰写规则】。",
       "timeStart": "本楼开始时的故事内时间(见下方【时间规则】)",
-      "timeEnd": "本楼结束时的故事内时间(见下方【时间规则】)"
+      "timeEnd": "本楼结束时的故事内时间(见下方【时间规则】)",
+      "location": "本楼结束时的地点;没变可与上一楼相同",
+      "locationPath": ["由粗到细的已记录路径,对不到细节就给到能对上的上级"]
     }
     // … 第 2 楼、第 3 楼 …,直到第 {{floor_count}} 楼,每个元素结构同上,n 依次为 2、3、…
   ]
 }
-每个元素只含 n、summary、timeStart、timeEnd 四个字段,不要添加其它字段。
+每个元素含 n、summary、timeStart、timeEnd,地点有变化或能确定时再给 location / locationPath。不要输出物品、计划等字段。
 
 ═══ 【时间规则】(每楼 timeStart / timeEnd 字段) ═══
 请为每楼给出本楼的起始时间(timeStart)与结束时间(timeEnd),作为剧情时间锚点。
@@ -480,7 +482,7 @@ ${RULE_SUMMARY_WRITE}
 
 【输出铁律】
 - 只输出一个 JSON 对象,根键只有 floors;floors 长度严格等于 {{floor_count}},n 从 1 连续到 {{floor_count}},不可缺楼、不可多楼、不可乱序。
-- 每个元素只含 n / summary / timeStart / timeEnd,不要输出 items / plans / location 等字段。
+- 每个元素含 n / summary / timeStart / timeEnd,地点能确定时再给 location / locationPath;不要输出 items / plans 等字段。
 - 严禁输出 JSON 以外的任何内容(不要解释、不要思维链、不要代码块围栏)。`;
 
 /**
@@ -492,7 +494,7 @@ export const BATCH_THINKING_CHECKLIST = `【输出前思考(简要)】
 1. 逐楼定位:这批共 {{floor_count}} 楼,我将**严格按先后顺序**为每楼产出一个数组元素,n 依次 1..{{floor_count}},不漏、不重、不乱序。
 2. 时间单调且完整:每楼标起止时间,后一楼不早于前一楼;无依据则按剧情流逝合理推算。现代/数字日期的两端都必须包含完整年份,不得缩写成月日或单独时刻。
 3. 收笔:每楼 summary 止步于该楼正文最后一个明文动作,不续写、不跨入下一楼。
-4. 只产摘要+时间:每个元素只含 n / summary / timeStart / timeEnd,不输出物品、计划、地点等字段。
+4. 只产摘要+时间+地点:每个元素含 n / summary / timeStart / timeEnd,地点能确定时再给 location / locationPath,不输出物品、计划等字段。
 思考结束后直接输出 JSON 对象(根键 floors),无 markdown 围栏、无解释。`;
 
 /**

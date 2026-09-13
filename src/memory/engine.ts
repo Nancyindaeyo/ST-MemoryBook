@@ -5,7 +5,8 @@ import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
 import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@/st/context';
 import { toast } from '@/st/toast';
-import { addSummary, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
+import { addSummary, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafBodyHash, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
+import { filterSummaryFeedIndices, summaryFeedNote } from './summaryFeed';
 import { extractJsonObject } from './json';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, selectRecentResolvedPlans, THINKING_CHECKLIST, THINKING_PREFILL } from './prompts';
@@ -77,7 +78,8 @@ export function currentSummaryPromise(): Promise<void> | null {
 
 /** 把消息渲染成给摘要模型的文本(cleanBody:裁正文段 + 整块删噪声标签 + 时间标签转文本) */
 function renderMessages(chat: STMessage[], indices: number[], name1: string, name2: string): string {
-  return indices
+  const feed = filterSummaryFeedIndices(chat, indices, apiSettings.summarizeAiOnly);
+  const body = feed
     .map(i => {
       const m = chat[i];
       if (!m) return '';
@@ -90,6 +92,7 @@ function renderMessages(chat: STMessage[], indices: number[], name1: string, nam
     })
     .filter(Boolean)
     .join('\n\n');
+  return body ? `${summaryFeedNote(apiSettings.summarizeAiOnly)}${body}` : '';
 }
 
 /** 把去空后的分段去重、join。世界书激活各来源统一收口于此(与旧行为一致)。 */
@@ -1026,8 +1029,9 @@ export function runSummary(aiFloor: number, options: RunSummaryOptions = {}): Pr
 }
 
 /**
- * 求某 AI 楼的「覆盖范围」(喂模型的上下文楼段):本 AI 楼 + 它前面紧邻的、尚未覆盖的(用户)楼层。
- * 碰到已覆盖楼或上一个 AI 楼即停。单楼与批量共用,保证两路径喂给模型的正文段一致。
+ * 求某 AI 楼的「覆盖范围」:本 AI 楼 + 它前面紧邻的、尚未覆盖的(用户)楼层。
+ * 碰到已覆盖楼或上一个 AI 楼即停。覆盖窗口、状态截止点、世界书扫描都用这段;
+ * 喂给摘要模型的正文再经 renderMessages 按「只总结 AI 输出」过滤。
  */
 function floorTargets(chat: STMessage[], aiFloor: number, covered: Set<number>): number[] {
   const targets: number[] = [aiFloor];
@@ -1088,6 +1092,7 @@ function applyLeafForFloor(
     createdAt: replaceLeaf?.createdAt ?? Date.now(),
     // 记录生成时所在页码,供 leafValid 判定归属(翻到别页时不串扰);缺 swipe_id 按第一页 0
     swipe: replaceLeaf?.swipe ?? (typeof chat[aiFloor].swipe_id === 'number' ? chat[aiFloor].swipe_id : 0),
+    srcHash: leafBodyHash(chat[aiFloor].mes),
     v: 1,
   };
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
@@ -1358,15 +1363,17 @@ async function summarizeBatchWork(
     return cleaned as Array<SummaryDelta & { summary: string }>;
   });
 
-  // 逐楼落叶(块内顺序,严格按 block 升序)。批量只取 summary + 起止时间:
-  // 显式剥掉 items/plans/location —— 这些跨多楼难保顺序正确(易致计划/时间错乱),
-  // 即便 AI 不听话硬产了也丢弃。结构化数据交给后续正常的逐楼自动摘要。
+  // 逐楼落叶(块内顺序,严格按 block 升序)。批量只取 summary + 起止时间 + 地点:
+  // 显式剥掉 items/plans —— 这些跨多楼难保顺序正确(易致计划错乱),
+  // 即便 AI 不听话硬产了也丢弃。物品/计划交给后续正常的逐楼自动摘要。
   block.forEach((f, idx) => {
     const r = list[idx];
     const lean: SummaryDelta = {
       summary: r.summary,
       timeStart: r.timeStart,
       timeEnd: r.timeEnd,
+      location: llmOptionalScalar(r.location),
+      locationPath: Array.isArray(r.locationPath) ? r.locationPath : undefined,
     };
     const sb = deriveMemory(chat, f);
     applyLeafForFloor(chat, f, lean, sb);
@@ -1382,8 +1389,8 @@ async function summarizeBatchWork(
 /**
  * 批量补摘:把待摘 AI 楼按内容量切块,逐块串行发请求、**严格按楼序逐楼落叶**。
  * 省 token 关键:固定上下文(破限/设定/前情)按块分摊,而非每楼重发。
- *  - 批量只产 summary + 起止时间(不产物品/计划),避免跨多楼的结构化数据顺序错乱;
- *    结构化数据交给后续正常的逐楼自动摘要补。
+ *  - 批量只产 summary + 起止时间 + 地点(不产物/计划),避免跨多楼的账本顺序错乱;
+ *    物品/计划交给后续正常的逐楼自动摘要补。
  *  - 块间串行 + 块内 AI 顺序维护时间单调,后块用前块落盘后的前情。
  *  - 某块解析失败(已含 summaryMaxRetries 次重试)→ 回退:对该块逐楼走单楼摘要(单楼路径仍产完整结构化数据),不中断整体。
  *  - 取消在块边界生效(不打断进行中的块)。

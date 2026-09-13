@@ -260,11 +260,10 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     // 否则这些旧剧情会直接漏召回。只阻塞窗口外,窗口内交给防抖增量。
     await ensureRecallIndex(signal);
 
-    // 1) 查询重写(强制启用,无降级):得多条 query 向量 + rerank 用的 query 文本。
-    // 重写失败/无 query 会抛错 → 落到外层 catch,清空注入槽、结束本次召回。
+    // 1) 查询重写:得多条 query 向量 + rerank 用的 query 文本。失败则降级为最近上下文单 query。
     const { queryVectors, rerankQuery } = await resolveQueryVectors(signal);
     if (!queryVectors.length) {
-      setRecallStatus('未召回:查询重写未产出 query');
+      setRecallStatus('未召回:没有可用的检索 query');
       clearRecallInjection();
       return;
     }
@@ -337,21 +336,39 @@ function recordRerankDebug(
   setRecallRerank(hits);
 }
 
+/** 查询重写失败时,用最近几楼清洗后正文当单条检索 query。 */
+function fallbackRecallQuery(chat: STMessage[] = getContext()?.chat ?? []): string {
+  const parts: string[] = [];
+  for (let i = chat.length - 1; i >= 0 && parts.length < 4; i--) {
+    const text = typeof chat[i]?.mes === 'string' ? cleanBody(chat[i].mes).trim() : '';
+    if (text) parts.push(text.slice(0, 600));
+  }
+  return parts.reverse().join('\n').trim().slice(0, 1500);
+}
+
 /**
  * 解析检索用的多条 query 向量 + rerank 用的 query 文本。
- * 查询重写**强制启用、无降级**:rewrite 得 INTENT + 多条 Q,各自 embed;rerank query 用 INTENT(无则首条 Q)。
- * 重写失败 / 无 query → 直接抛错,由 runVectorRecall 结束本次召回(不再降级为单 query)。
+ * 查询重写成功则用 INTENT + 多条 Q;失败或空结果则降级为最近上下文单 query。
  */
 async function resolveQueryVectors(
   signal?: AbortSignal,
 ): Promise<{ queryVectors: string[]; rerankQuery: string }> {
-  const { intent, queries } = await rewriteQuery(signal);
-  setRecallRewrite(intent, queries);
-  if (!queries.length) throw new Error('查询重写未产出任何 query');
-  // 检索向量:多条 Q(INTENT 偏长偏全文,留给 rerank,不进检索向量以免稀释)
-  const vecs = await embedTexts(queries, signal);
-  const queryVectors = vecs.map(v => encodeFloat32Base64(v));
-  return { queryVectors, rerankQuery: intent || queries[0] };
+  try {
+    const { intent, queries } = await rewriteQuery(signal);
+    setRecallRewrite(intent, queries);
+    if (queries.length) {
+      const vecs = await embedTexts(queries, signal);
+      return { queryVectors: vecs.map(v => encodeFloat32Base64(v)), rerankQuery: intent || queries[0] };
+    }
+    console.warn('[柏宝书向量] 查询重写未产出 query,降级为最近上下文');
+  } catch (error) {
+    console.warn('[柏宝书向量] 查询重写失败,降级为最近上下文:', error);
+  }
+  const fallback = fallbackRecallQuery();
+  if (!fallback) throw new Error('查询重写失败且没有可用的最近上下文');
+  setRecallRewrite(fallback, [fallback]);
+  const [vec] = await embedTexts([fallback], signal);
+  return { queryVectors: [encodeFloat32Base64(vec)], rerankQuery: fallback };
 }
 
 interface RankedHit extends VecHit {

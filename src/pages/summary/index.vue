@@ -369,7 +369,7 @@ function toRow(n: ViewNode, map: Map<string, ViewNode>): SummaryRow {
     floorLo: lo,
     floorHi: hi,
     msgIndex: n.kind === 'leaf' ? n.msgIndex : undefined,
-    stale: false,
+    stale: n.kind === 'leaf' && !!derivedMeta.leaves.find(l => l.id === n.id)?.outdated,
     imported: n.atomic === true,
   };
 }
@@ -1113,7 +1113,7 @@ provide(SUMMARY_CTX, {
         v-for="r in visibleRows"
         :key="r.key"
         class="bbs-summary-card"
-        :class="{ 'is-deep': r.level > 0, 'is-stale': r.stale, 'is-child': r.isChild, 'is-selected': selectMode && selectedIds.has(r.id) }"
+        :class="{ 'is-deep': r.level > 0, 'is-child': r.isChild, 'is-selected': selectMode && selectedIds.has(r.id) }"
         :role="selectMode ? 'checkbox' : undefined"
         :aria-checked="selectMode ? selectedIds.has(r.id) : undefined"
         :tabindex="selectMode ? 0 : undefined"
@@ -1146,7 +1146,7 @@ provide(SUMMARY_CTX, {
               <span class="bbs-summary-loc">{{ floorLabel(r) }}</span>
               <span v-if="rowTime(r)" class="bbs-summary-dateline">{{ rowTime(r) }}</span>
             </template>
-            <span v-if="r.stale" class="bbs-summary-stale">待更新</span>
+            <span v-if="r.stale" class="bbs-summary-stale">正文已改</span>
             <!-- 操作键:编辑对任何命中行开放(结构安全;叶子改完向量自动重 embed,总结不进向量库);
                  删除仅根行(删深层会级联删祖先总结链);选择模式无操作 -->
             <span v-if="!selectMode" class="bbs-summary-acts">

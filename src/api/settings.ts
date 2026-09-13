@@ -204,6 +204,11 @@ export interface ApiSettings {
    * 也不再把物品/变量变动旁注写回正文。已有正文旁注不主动清理。
    */
   summaryOnlyMode: boolean;
+  /**
+   * 只总结 AI 输出。开启后,喂给摘要/总结模型的正文不含 user 楼;
+   * 覆盖窗口、状态派生、世界书关键词激活仍读取 user 楼。
+   */
+  summarizeAiOnly: boolean;
   /** 注入设置:各状态块是否注入主模型(仅摘要模式开启时整组不生效) */
   injection: InjectionSections;
   /** 保留最近 N 条 AI 消息发全文(滑动窗口);更早的自动摘要并隐藏 */
@@ -348,6 +353,7 @@ function defaults(): ApiSettings {
     assignments: { summary: '', resummary: '' },
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
+    summarizeAiOnly: false,
     injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, items: true, scenes: true },
     keepRecent: 3,
     excludedChars: [],
@@ -417,6 +423,7 @@ function normalize(raw: unknown): ApiSettings {
   // 渲染世界书模板:布尔,缺失(老数据无此键)回退 true(默认开,让动态世界书条目拿到成品)
   merged.renderWorldInfoTemplates =
     typeof merged.renderWorldInfoTemplates === 'boolean' ? merged.renderWorldInfoTemplates : true;
+  merged.summarizeAiOnly = typeof merged.summarizeAiOnly === 'boolean' ? merged.summarizeAiOnly : false;
   // 注入设置:嵌套对象,逐字段兜底(老数据没有 injection 键时全回退 true = 老行为不变)
   const ri = ((raw as Partial<ApiSettings>).injection ?? {}) as Partial<InjectionSections>;
   merged.injection = {
@@ -604,6 +611,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.assignments = src.assignments;
   target.autoSummaryEnabled = src.autoSummaryEnabled;
   target.summaryOnlyMode = src.summaryOnlyMode;
+  target.summarizeAiOnly = src.summarizeAiOnly;
   target.injection = src.injection;
   target.keepRecent = src.keepRecent;
   target.excludedChars = src.excludedChars;

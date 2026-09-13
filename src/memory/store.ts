@@ -1,7 +1,7 @@
 import { apiSettings, currentCharKey } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
 import { reactive } from 'vue';
-import { deriveMemory, getLeaf, leafValid } from './apply';
+import { deriveMemory, getLeaf, leafBodyOutdated, leafValid } from './apply';
 import { isAiFloor, pendingAiFloors } from './engine';
 import { latestStoryTime } from './timeTag';
 import type { BaibaiMemory, LeafExtra, MemSummary, StoredDelta, VarTemplate, VarTier } from './types';
@@ -28,7 +28,8 @@ export interface LeafView {
   createdAt: number;
   msgIndex: number;
   active: boolean; // 所在消息已隐藏(is_system)
-  stale: boolean; // 正文已变、尚未重摘
+  stale: boolean; // 叶子对当前 swipe 无效
+  outdated: boolean; // 有效叶子的正文已变、尚未重摘
 }
 export const derivedMeta = reactive<{ hasLeaf: boolean; leaves: LeafView[]; pendingFloors: number[]; latestStoryTime: string; rev: number }>({
   hasLeaf: false,
@@ -95,6 +96,7 @@ export function recomputeDerived(): void {
         msgIndex: i,
         active: m.is_system === true,
         stale: !valid,
+        outdated: valid && leafBodyOutdated(m),
       });
     }
   }

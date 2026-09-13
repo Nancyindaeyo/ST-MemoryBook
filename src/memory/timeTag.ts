@@ -11,8 +11,11 @@
 
 import { apiSettings } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
+import { hideTimeFindRegex } from './hideRegex';
 import { stripBaiBaiImageTags } from './imageTag';
 import type { LeafExtra } from './types';
+
+export { hideTimeFindRegex };
 
 /** 标签固定标识(解析正则与隐藏正则都依赖它) */
 export const START_TAG = 'bbs_start';
@@ -471,13 +474,6 @@ const HIDE_VARS_SCRIPT_ID = 'bbs-vars-tag-hide';
 const PLACEMENT_MD_DISPLAY = 0;
 const PLACEMENT_USER_INPUT = 1;
 const PLACEMENT_AI_OUTPUT = 2;
-
-/** 时间标签只允许在同一行内闭合;两个标签写成完整分支,不会交叉配对。 */
-function hideTimeFindRegex(): string {
-  const start = `<${START_TAG}\\b[^>\\r\\n]*>[^<\\r\\n]*<\\/${START_TAG}>`;
-  const end = `<${END_TAG}\\b[^>\\r\\n]*>[^<\\r\\n]*<\\/${END_TAG}>`;
-  return `/${start}|${end}/gi`;
-}
 
 /** 物品旁注允许跨行,但只隐藏「独占行 + 插件物品动词格式」的完整块。 */
 function hideItemsFindRegex(): string {

@@ -312,4 +312,20 @@ includes(applySource, 'if (!changed) return false;', '未写入任何操作时�
 const timeTagSource = await readFile(new URL('../src/memory/timeTag.ts', import.meta.url), 'utf8');
 includes(timeTagSource, 's = stripBaiBaiImageTags(s);', '统一正文清洗必须过滤柏宝绘标签');
 
+const { filterSummaryFeedIndices, summaryFeedNote } = await importStandalone('../src/memory/summaryFeed.ts');
+const feedChat = [
+  { is_user: true, mes: '用户说去买剑' },
+  { is_user: false, mes: '角色把剑递过去' },
+  { is_user: true, mes: '用户收好' },
+];
+deepEqual(filterSummaryFeedIndices(feedChat, [0, 1, 2], false), [0, 1, 2], '默认摘要正文应包含 user 楼');
+deepEqual(filterSummaryFeedIndices(feedChat, [0, 1, 2], true), [1], '只总结 AI 输出时应去掉 user 楼');
+equal(summaryFeedNote(true).includes('只含 AI 输出'), true, '只总结 AI 输出时应给模型说明');
+equal(summaryFeedNote(false), '', '默认不应附加摘要正文说明');
+
+const { hideTimeFindRegex } = await importStandalone('../src/memory/hideRegex.ts');
+const hideTime = new RegExp(hideTimeFindRegex().slice(1, hideTimeFindRegex().lastIndexOf('/')), 'gi');
+const multilineTags = '<bbs_start>\n1988/9/29 21:30\n</bbs_start>\n正文\n<bbs_end>\n1988/9/29 21:45\n</bbs_end>';
+equal(multilineTags.replace(hideTime, '').trim(), '正文', '跨行时间标签应能被显示层隐藏');
+
 console.log(`memory regression tests passed: ${assertions} assertions`);

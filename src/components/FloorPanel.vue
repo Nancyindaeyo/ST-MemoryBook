@@ -19,7 +19,7 @@ import Icon from '@/components/Icon.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
-import { getLeaf, leafValid, deleteLeafAt, editLeafFull, planContentById, describeVarOp } from '@/memory/apply';
+import { getLeaf, leafBodyOutdated, leafValid, deleteLeafAt, editLeafFull, planContentById, describeVarOp } from '@/memory/apply';
 import { engineState, floorBackfillState, regenerateFloor, setFloorOmit, summarizeFloor } from '@/memory/engine';
 import { derivedMeta } from '@/memory/store';
 import { ui } from '@/state/ui';
@@ -55,6 +55,11 @@ const valid = computed(() => {
   void derivedMeta.rev;
   return leafValid(msg.value);
 });
+const outdated = computed(() => {
+  void props.sig.tick;
+  void derivedMeta.rev;
+  return leafBodyOutdated(msg.value);
+});
 const d = computed<StoredDelta | null>(() => leaf.value?.delta ?? null);
 
 const expanded = ref(false);
@@ -73,6 +78,7 @@ const summaryActionDisabled = computed(() => busy.value || engineState.running |
 const summaryActionTitle = computed(() => {
   if (omit.value) return '番外楼不参与摘要,请先取消番外';
   if (summarizingHere.value) return `正在生成楼层 #${props.floor} 的摘要`;
+  if (valid.value && outdated.value) return `正文已改,建议重新生成楼层 #${props.floor} 的摘要`;
   return valid.value ? `重新生成楼层 #${props.floor} 的摘要` : `生成楼层 #${props.floor} 的摘要`;
 });
 
@@ -649,6 +655,7 @@ const groups = computed(() => [
         <span class="bbs-fp-head-main">
           <span class="bbs-fp-head-top">
             <span class="bbs-fp-floor" :class="{ 'is-pending': !omit && !valid, 'is-omit': omit }">#{{ floor }}</span>
+            <span v-if="outdated" class="bbs-fp-outdated">正文已改</span>
             <span v-if="timeLabel" class="bbs-fp-head-time">🕑 {{ timeLabel }}</span>
           </span>
           <span class="bbs-fp-preview" :class="{ 'is-muted': previewMuted }">{{ previewText }}</span>
@@ -925,6 +932,18 @@ const groups = computed(() => [
   font-size: 11.5px;
   color: var(--bbs-ink-muted);
   font-variant-numeric: tabular-nums;
+}
+.bbs-fp-outdated {
+  flex: 0 0 auto;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bbs-warning);
+  background: var(--bbs-warning-soft);
+  border-radius: var(--bbs-radius-sm);
 }
 /* 楼号做成药丸,与主界面摘要卡的 #楼层 标签同款——面板一眼就与主界面同源 */
 .bbs-fp-floor {
