@@ -9,7 +9,7 @@ import { mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/cl
 import { apiSettings, engineActiveHere, getChannelForTask } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
 import { clearLlmPickInjection, writeLlmPickInjection } from './inject';
-import { extractJsonObjectLoose } from './json';
+import { extractJsonObject } from './json';
 import {
   buildLeafCatalog,
   parseOneBasedIndexes,
@@ -143,7 +143,7 @@ async function askLlmPick(
   const sender = resolveSender();
   if (!sender) return null;
   const raw = await sender.send([{ role: 'user', content: buildPickPrompt(haystack, catalog, chunks, maxLeaves, maxPrequel) }]);
-  const d = extractJsonObjectLoose<{ c?: unknown; p?: unknown; leaves?: unknown; prequels?: unknown }>(raw);
+  const d = extractJsonObject<{ c?: unknown; p?: unknown; leaves?: unknown; prequels?: unknown }>(raw);
   if (!d) return null;
   const cIdx = parseOneBasedIndexes(d.c ?? d.leaves, catalog.length);
   const pIdx = parseOneBasedIndexes(d.p ?? d.prequels, chunks.length);

@@ -30,6 +30,7 @@ export interface LeafView {
   active: boolean; // 所在消息已隐藏(is_system)
   stale: boolean; // 叶子对当前 swipe 无效
   outdated: boolean; // 有效叶子的正文已变、尚未重摘
+  quotes?: { text: string; why?: string }[];
 }
 export const derivedMeta = reactive<{ hasLeaf: boolean; leaves: LeafView[]; pendingFloors: number[]; latestStoryTime: string; rev: number }>({
   hasLeaf: false,
@@ -98,6 +99,7 @@ export function recomputeDerived(): void {
         active: m.is_system === true,
         stale: !valid,
         outdated: valid && leafBodyOutdated(m),
+        quotes: leaf.quotes?.length ? leaf.quotes : undefined,
       });
     }
   }

@@ -98,7 +98,7 @@ export function parseOneBasedIndexes(raw: unknown, max: number): number[] {
 }
 
 export function buildLeafCatalog(
-  leaves: Array<{ id: string; text: string; msgIndex: number; stale?: boolean; timeStart?: string; timeLabel?: string }>,
+  leaves: Array<{ id: string; text: string; msgIndex: number; stale?: boolean; timeStart?: string; timeLabel?: string; quotes?: { text: string }[] }>,
   excludeIds: Set<string>,
   max = 40,
 ): LeafCatalogItem[] {
@@ -108,7 +108,8 @@ export function buildLeafCatalog(
   const sorted = [...leaves].sort((a, b) => b.msgIndex - a.msgIndex);
   for (const leaf of sorted) {
     if (leaf.stale || excludeIds.has(leaf.id) || seen.has(leaf.id)) continue;
-    const text = String(leaf.text ?? '').replace(/\s+/g, ' ').trim();
+    const quoteBit = (leaf.quotes ?? []).map(q => q.text).filter(Boolean).join(' ');
+    const text = [leaf.text, quoteBit].join(' ').replace(/\s+/g, ' ').trim();
     if (!text) continue;
     seen.add(leaf.id);
     items.push({

@@ -14,11 +14,12 @@ import { apiSettings, engineActiveHere } from '@/api/settings';
 import type { STMessage } from '@/st/context';
 import { getContext } from '@/st/context';
 import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid } from './apply';
-import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
+import { fmtItems, fmtPlansForInjection, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
+import { collectHiddenQuotes, fmtExactQuotes } from './quotes';
 import { budgetTiersToTry, filterItemsForBudget, filterNpcsForBudget, normalizeBudgetTokens, type InjectBudgetTier } from './injectBudget';
 import { npcNameList, visibilityInjectTag } from './npcIdentity';
 import { fmtNpcTiesContext } from './npcRelations';
-import { memory } from './store';
+import { derivedMeta, memory } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
 import { relativeTimeLabel, weekdayLabel, ageDisplay, calculateRelativeDays } from './timeRel';
 import { selectViewNodes, selectLifeDetailsForInjection, type ViewNode } from './select';
@@ -634,7 +635,12 @@ function assembleStateInjection(level: InjectBudgetTier, mention: string): strin
   const openPlans = memory.plans
     .filter(p => p.status === 'open')
     .map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime, visibility: p.visibility }));
-  st.push(`未了结的计划/悬念:\n${fmtPlans(openPlans)}`);
+  st.push(`未了结的计划/悬念:\n${fmtPlansForInjection(openPlans)}`);
+
+  const hiddenQuotes = collectHiddenQuotes(derivedMeta.leaves);
+  if (hiddenQuotes.length) {
+    st.push(`必须逐字保留的原句(口令/数字/誓约等,续写勿改写):\n${fmtExactQuotes(hiddenQuotes)}`);
+  }
 
   if (!tight) {
     const recentResolved = selectRecentResolvedPlans(memory.plans, apiSettings.recentResolvedPlansCount);
@@ -653,7 +659,7 @@ function assembleStateInjection(level: InjectBudgetTier, mention: string): strin
   }
 
   const hasProtagonist = inj.protagonist && Object.values(memory.protagonist).some(value => typeof value === 'string' && !!oneLine(value));
-  const hasState = memory.state.time || memory.state.location || (inj.sceneFocus && memory.state.sceneFocus) || hasProtagonist || (itemsOn && memory.items.length) || (scenesOn && memory.scenes.length) || (npcsOn && memory.npcs.length) || openPlans.length || hasVarState || (inj.lifeDetails && memory.lifeDetails.length);
+  const hasState = memory.state.time || memory.state.location || (inj.sceneFocus && memory.state.sceneFocus) || hasProtagonist || (itemsOn && memory.items.length) || (scenesOn && memory.scenes.length) || (npcsOn && memory.npcs.length) || openPlans.length || hiddenQuotes.length || hasVarState || (inj.lifeDetails && memory.lifeDetails.length);
   if (!hasState) return '';
   return `${MEMORY_BRIEFING_NOTE}\n[当前状态]\n${st.join('\n')}\n${MEMORY_BRIEFING_END}`;
 }

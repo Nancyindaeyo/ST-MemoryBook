@@ -85,7 +85,8 @@ function collectLeaves(chat: STMessage[]): LeafForIndex[] {
     if (!leafValid(chat[i])) continue;
     const leaf = getLeaf(chat[i]) as LeafExtra;
     if (leaf.seed || seeds.has(leaf.id)) continue; // 种子叶子:承载整段总结,不进向量库(见 LeafExtra.seed)
-    const document = (leaf.text ?? '').trim();
+    const quoteLine = (leaf.quotes ?? []).map(q => q.text).filter(Boolean).join(' ');
+    const document = [leaf.text, quoteLine].map(s => (s ?? '').trim()).filter(Boolean).join('\n');
     if (!document) continue; // 空摘要不索引
     const mesFull = stripThinkBlocks(chat[i].mes);
     const storyTime = leafStoryTime(leaf);

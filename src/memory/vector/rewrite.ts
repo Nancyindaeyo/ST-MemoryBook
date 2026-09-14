@@ -19,7 +19,7 @@ import { apiSettings, resolveVectorModel } from '@/api/settings';
 import { deriveMemory, getLeaf, leafValid } from '../apply';
 import { resolveKeepStart } from '../engine';
 import { renderHistoryNodes, selectHistoryNodesBefore } from '../inject';
-import { fmtItems, fmtNpcs, fmtPlans, fmtProtagonist, JAILBREAK_PROMPT, QUERY_REWRITE_SYSTEM, QUERY_REWRITE_TAIL } from '../prompts';
+import { fmtItems, fmtNpcs, fmtPlansForInjection, fmtProtagonist, JAILBREAK_PROMPT, QUERY_REWRITE_SYSTEM, QUERY_REWRITE_TAIL } from '../prompts';
 import { memory } from '../store';
 import { cleanBody } from '../timeTag';
 import { fetchWithTimeoutRetry } from './embed';
@@ -64,7 +64,7 @@ function buildStateSnapshot(chat: STMessage[], upTo: number): string {
   }
   const openPlans = st.plans.filter(p => p.status === 'open');
   if (openPlans.length) {
-    lines.push(`未了结的计划/悬念:\n${fmtPlans(openPlans.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })))}`);
+    lines.push(`未了结的计划/悬念:\n${fmtPlansForInjection(openPlans.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })))}`);
   }
   if (!lines.length) return '';
   return `[状态快照:以下为已滚出最近窗口、但仍有效的主角档案、物品、NPC 与未了结计划,供你解析模糊指代]\n${lines.join('\n')}`;

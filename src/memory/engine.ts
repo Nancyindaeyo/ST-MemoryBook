@@ -7,7 +7,8 @@ import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@
 import { toast } from '@/st/toast';
 import { addSummary, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafBodyHash, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
 import { filterSummaryFeedIndices, summaryFeedNote } from './summaryFeed';
-import { extractJsonObjectLoose } from './json';
+import { extractJsonObject } from './json';
+import { cleanExactQuotes } from './quotes';
 import { clearInjection, clearLlmPickInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, selectRecentResolvedPlans, THINKING_CHECKLIST, THINKING_PREFILL } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
@@ -1095,6 +1096,8 @@ function applyLeafForFloor(
     srcHash: leafBodyHash(chat[aiFloor].mes),
     v: 1,
   };
+  const quotes = cleanExactQuotes(delta.quotes, clampToTimeTags(chat[aiFloor].mes));
+  if (quotes.length) leaf.quotes = quotes;
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
   // 叶子正文/摘要已变 → 召回读到的向量内容会变,立即失效召回缓存(防重生成/翻页复用旧召回)。
@@ -1185,7 +1188,7 @@ async function summarizeFloorWork(
   options.onRequestStart?.();
   const delta = await sendAndParse(sender.send, messages, raw => {
     console.log('[柏宝书] 摘要原始返回(未清洗):\n', raw);
-    const d = extractJsonObjectLoose<SummaryDelta>(raw);
+    const d = extractJsonObject<SummaryDelta>(raw);
     const summary = llmString(d?.summary);
     if (!d || !summary) {
       throw new Error(raw.trim() ? '摘要失败:AI道歉或掉格式' : '摘要失败:AI空回');
@@ -1344,7 +1347,7 @@ async function summarizeBatchWork(
   // 解析 { floors: [...] };校验长度等于块楼数(缺楼/多楼都算失败,触发重试/回退)
   const list = await sendAndParse(sender.send, messages, raw => {
     console.log('[柏宝书] 批量摘要原始返回(未清洗):\n', raw);
-    const d = extractJsonObjectLoose<{ floors?: SummaryDelta[] }>(raw);
+    const d = extractJsonObject<{ floors?: SummaryDelta[] }>(raw);
     const floors = d?.floors;
     if (!Array.isArray(floors) || !floors.length) {
       throw new Error(raw.trim() ? '批量摘要失败:AI道歉或掉格式' : '批量摘要失败:AI空回');
@@ -1374,6 +1377,7 @@ async function summarizeBatchWork(
       timeEnd: r.timeEnd,
       location: llmOptionalScalar(r.location),
       locationPath: Array.isArray(r.locationPath) ? r.locationPath : undefined,
+      quotes: r.quotes,
     };
     const sb = deriveMemory(chat, f);
     applyLeafForFloor(chat, f, lean, sb);
@@ -1594,7 +1598,7 @@ export async function checkResummary(): Promise<number> {
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
       const delta = await sendAndParse(sender.send, messages, raw => {
         console.log('[柏宝书] 总结原始返回(未清洗):\n', raw);
-        const d = extractJsonObjectLoose<{ summary?: string }>(raw);
+        const d = extractJsonObject<{ summary?: string }>(raw);
         const summary = llmString(d?.summary);
         if (!summary) {
           // 输出层级 level+1:为 1 是普通总结,≥2 是二次总结;有文本=掉格式,空白=空回
@@ -1750,7 +1754,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     messages.push({ role: 'user', content: prompt });
     const delta = await sendAndParse(sender.send, messages, raw => {
       console.log('[柏宝书] 强制总结原始返回(未清洗):\n', raw);
-      const d = extractJsonObjectLoose<{ summary?: string }>(raw);
+      const d = extractJsonObject<{ summary?: string }>(raw);
       const summary = llmString(d?.summary);
       if (!summary) {
         const what = level === 1 ? '总结' : '二次总结';

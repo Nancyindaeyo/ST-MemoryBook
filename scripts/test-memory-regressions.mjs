@@ -391,24 +391,37 @@ deepEqual(
 equal(normalizeBudgetTokens(-1), 0, '非法预算回退为不裁剪');
 equal(npcMentioned({ name: '小红', aliases: ['红红'] }, '红红推门进来'), true, '别名应能命中本轮提及');
 
-const {
-  extractJsonObject,
-  extractJsonObjectLoose,
-} = await importStandalone('../src/memory/json.ts');
-const brokenNpcJson = `{
-  "summary": "他走进药铺",
-  "npcs": oops,
-  "time": "第三天"
-}`;
-equal(extractJsonObject(brokenNpcJson), null, '严格解析应对坏字段整段失败');
-const salvaged = extractJsonObjectLoose(brokenNpcJson);
-equal(salvaged?.summary, '他走进药铺', '宽松解析应保住 summary');
-equal(salvaged?.time, '第三天', '宽松解析应保住 time');
-equal(salvaged?.npcs, undefined, '坏字段应被丢掉而不是连坐');
+const { extractJsonObject } = await importStandalone('../src/memory/json.ts');
 equal(
-  extractJsonObjectLoose('说明文字 {"summary":"合法"} 尾巴')?.summary,
+  extractJsonObject(`{ "summary": "他走进药铺", "npcs": oops, "time": "第三天" }`),
+  null,
+  '坏字段应让整段 JSON 失败,整楼重试',
+);
+equal(
+  extractJsonObject('说明文字 {"summary":"合法"} 尾巴')?.summary,
   '合法',
-  '宽松解析仍应走围栏外截取',
+  '整段合法时仍应截取 JSON',
+);
+
+const { cleanExactQuotes, quoteInSource, collectHiddenQuotes, fmtExactQuotes } = await importStandalone('../src/memory/quotes.ts');
+equal(quoteInSource('雨落三声', '他把暗号说成雨落三声。'), true, '原句应能在正文中命中');
+equal(quoteInSource('正文没有的句', '他把暗号说成雨落三声。'), false, '编造原句不得入库');
+deepEqual(
+  cleanExactQuotes(
+    [{ text: '雨落三声', why: '暗号' }, { text: '编造的', why: '假' }, '雨落三声'],
+    '他把暗号说成雨落三声。',
+  ),
+  [{ text: '雨落三声', why: '暗号' }],
+  '只保留正文里出现过的原句并去重',
+);
+includes(fmtExactQuotes([{ text: '雨落三声', why: '暗号' }]), '原句「雨落三声」', '注入应标原句');
+deepEqual(
+  collectHiddenQuotes([
+    { quotes: [{ text: '旧口令' }], active: true, stale: false, msgIndex: 2 },
+    { quotes: [{ text: '窗口内' }], active: false, stale: false, msgIndex: 8 },
+  ]).map(q => q.text),
+  ['旧口令'],
+  '精确引文只收集已隐藏且有效的叶子',
 );
 
 const {

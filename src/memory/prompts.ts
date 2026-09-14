@@ -325,6 +325,13 @@ export const RULE_ABSOLUTE_TIME_LANGUAGE = `═══ 【摘要时间语言铁�
 - 若现有时间锚点确实不足以换算,只保留明确事实与先后关系并注明"具体日期未确定",严禁猜造日期。
 - 绝对日期一旦写定,后续压缩必须原样保留;不得重新改写成任何相对时间。`;
 
+/** 精确引文:只收不可改写的原句,必须能在正文里找到。 */
+export const RULE_QUOTES = `═══ 【精确引文】(quotes 字段,高门槛) ═══
+只收录改写后会出事的原句:暗号/口令、精确数字与剂量、日期时刻、誓约原话、不可替换的专名口令。
+普通对话、情绪、动作描写一律不收。没有就省略整个字段。
+每条 { "text": "正文里的原句,必须逐字照抄", "why": "为何不能改写,几个字" }。最多 6 条。
+text 必须在【本轮对话】里原样出现;不得改写、补全或翻译。`;
+
 /** 摘要撰写规则(summary 字段)。含 {{summary_words}} 宏,由 fill() 填字数。 */
 export const RULE_SUMMARY_WRITE = `═══ 【摘要撰写规则】(summary 字段,必填) ═══
 ★ 核心目标:为未来的 AI 提供无损的"前情提要",必须具体且信息密集,字数 {{summary_words}} 字。
@@ -405,7 +412,8 @@ ${RULE_LONGTERM_DB}
   "plans": {
     "add": [{ "kind": "plan", "content": "新出现的计划/目标", "createdTime": "立计划时的故事内时间", "targetTime": "打算完成的目标时间(见下)" }, { "kind": "suspense", "content": "正文明确留下的待揭晓事实,或已经启动且等待结果的外部事件", "createdTime": "悬念出现时的故事内时间" }],
     "resolve": [{ "id": "p1", "outcome": "done|cancelled|failed", "reason": "一句话:为什么/如何了结(见下方【核销/了结】)" }]
-  }{{lifedetails_field}}{{vars_field}}
+  }{{lifedetails_field}}{{vars_field}},
+  "quotes": [{ "text": "必须逐字保留的原句", "why": "口令/数字/誓约等,没有则省略整个字段" }]
 }
 
 {{time_rule}}
@@ -422,6 +430,8 @@ ${RULE_PLANS}
 
 ${RULE_SCENE_FOCUS}
 {{lifedetails_rule}}{{vars_rule}}
+${RULE_QUOTES}
+
 ${RULE_SUMMARY_WRITE}
 
 【输出铁律】
@@ -453,7 +463,7 @@ export const BATCH_SUMMARY_PROMPT = `你是严谨的剧情记忆整理员。下�
 {{content}}
 
 ═══ 【批量任务说明(关键)】 ═══
-- 本次只做三件事:为每楼写**摘要正文**(summary)+ 标注**起止时间**(timeStart/timeEnd)+ 本楼结束时的**地点**(location,可选 locationPath)。
+- 本次只做:为每楼写**摘要正文**(summary)+ 标注**起止时间**(timeStart/timeEnd)+ 本楼结束时的**地点**(location,可选 locationPath)+ 如有则给**精确引文**(quotes)。
   **不要**输出物品、计划、悬念等其它字段——批量补摘不管账本,其余交给后续处理。
 - 你要为这 {{floor_count}} 个楼层【各自】产出一个元素,**严格按上面第 1..{{floor_count}} 楼的先后顺序**一一对应,顺序绝不能打乱。
 - 每楼只摘**该楼正文**;时间按剧情自然推进,后面楼的时间不早于前面楼(见【时间规则】)。
@@ -468,7 +478,8 @@ export const BATCH_SUMMARY_PROMPT = `你是严谨的剧情记忆整理员。下�
       "timeStart": "本楼开始时的故事内时间(见下方【时间规则】)",
       "timeEnd": "本楼结束时的故事内时间(见下方【时间规则】)",
       "location": "本楼结束时的地点;没变可与上一楼相同",
-      "locationPath": ["由粗到细的已记录路径,对不到细节就给到能对上的上级"]
+      "locationPath": ["由粗到细的已记录路径,对不到细节就给到能对上的上级"],
+      "quotes": [{ "text": "必须逐字保留的原句", "why": "没有则省略" }]
     }
     // … 第 2 楼、第 3 楼 …,直到第 {{floor_count}} 楼,每个元素结构同上,n 依次为 2、3、…
   ]
@@ -485,11 +496,13 @@ export const BATCH_SUMMARY_PROMPT = `你是严谨的剧情记忆整理员。下�
 
 ${RULE_COMPLETE_TIME_ANCHOR}
 
+${RULE_QUOTES}
+
 ${RULE_SUMMARY_WRITE}
 
 【输出铁律】
 - 只输出一个 JSON 对象,根键只有 floors;floors 长度严格等于 {{floor_count}},n 从 1 连续到 {{floor_count}},不可缺楼、不可多楼、不可乱序。
-- 每个元素含 n / summary / timeStart / timeEnd,地点能确定时再给 location / locationPath;不要输出 items / plans 等字段。
+- 每个元素含 n / summary / timeStart / timeEnd,地点能确定时再给 location / locationPath;有口令/数字/誓约才给 quotes;不要输出 items / plans 等字段。
 - 严禁输出 JSON 以外的任何内容(不要解释、不要思维链、不要代码块围栏)。`;
 
 /**
@@ -866,6 +879,12 @@ export function fmtPlans(plans: BuildArgs['openPlans']): string {
     .join('\n');
 }
 
+/** 主模型注入用:点明这些是当时记下的条目,以后文和已了结列表为准。 */
+export function fmtPlansForInjection(plans: BuildArgs['openPlans']): string {
+  if (!plans.length) return '  (无)';
+  return `  这些是当时记下的未了结项,不代表如今尚未完成或仍有效;以后文和「近期已了结」为准。不要主动催办或当成必须执行,除非本轮正文仍在推进同一件事。\n${fmtPlans(plans)}`;
+}
+
 /** 局势卡渲染给副 API(只读参考,单行内联)。null → (无)。 */
 export function fmtSceneFocus(f: SceneFocus | null): string {
   if (!f) return '  (无)';
@@ -984,6 +1003,14 @@ const LIFE_DETAILS_PROTOCOL_SUPPLEMENT = `【柏宝书生活小档案兼容协�
 
 ${RULE_LIFE_DETAILS}`;
 
+const QUOTES_PROTOCOL_SUPPLEMENT = `【柏宝书精确引文兼容协议】
+最终 JSON 根对象可增加可选字段 quotes(没有不可改写的原句就省略):
+{
+  "quotes": [{ "text": "正文里的原句,必须逐字照抄", "why": "暗号/数字/誓约等" }]
+}
+
+${RULE_QUOTES}`;
+
 /** 构造楼层摘要提示词。自定义模板也强制追加主角档案协议与摘要时间语言铁律。 */
 export function buildSummaryPrompt(a: BuildArgs): string {
   const custom = apiSettings.prompts.summary.trim();
@@ -1024,7 +1051,7 @@ export function buildSummaryPrompt(a: BuildArgs): string {
   const prompt = fill(tpl, macros);
   if (!custom) return prompt;
   const supplements = [fill(PROTAGONIST_PROTOCOL_SUPPLEMENT, macros), RULE_ABSOLUTE_TIME_LANGUAGE, SCENE_FOCUS_PROTOCOL_SUPPLEMENT];
-  supplements.push(LIFE_DETAILS_PROTOCOL_SUPPLEMENT);
+  supplements.push(LIFE_DETAILS_PROTOCOL_SUPPLEMENT, QUOTES_PROTOCOL_SUPPLEMENT);
   // {{time_rule}} 在无时间标签时本身已经带有完整时间协议;
   // 只有自定义模板没有带入它时,才追加兼容协议,避免完整时间要求重复注入。
   if (!a.hasTimeTags && !prompt.includes('【完整时间锚点格式(系统强制)】')) {

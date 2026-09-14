@@ -15,6 +15,10 @@
  *  - 编辑/删除一条已被压缩的叶子 → 删除包含它的整条祖先压缩链(见 apply.pruneBrokenComps)。
  */
 
+import type { ExactQuote } from './quotes';
+
+export type { ExactQuote } from './quotes';
+
 export const MEMORY_KEY = 'baibai_book';
 /** 3 = 混合架构(叶子在消息 extra);2 = 叶子也在森林;1 = 独立 items/plans/state */
 export const MEMORY_VERSION = 3;
@@ -326,6 +330,8 @@ export interface LeafExtra {
    * 仅用于提示「正文已改、建议重摘」。旧叶子缺此字段则不提示。
    */
   srcHash?: string;
+  /** 必须逐字保留的原句(口令/数字/誓约)。不进重放,只供注入。 */
+  quotes?: ExactQuote[];
   /**
    * 种子叶子标记:carryover(带数据建新对话)挂在 #0 的那条叶子,其 text 是旧对话「合并总结」的散文。
    * 它只服务于状态重放(deriveMemory 读 delta)与历史摘要注入(被 sum_carry_ 的 L2 收纳),
@@ -610,6 +616,8 @@ export type SceneOp =
 export interface SummaryDelta {
   /** 本楼层叙事摘要正文 */
   summary?: string;
+  /** 必须逐字保留的原句。落叶时校验必须出现在本楼正文里,否则丢掉该条。 */
+  quotes?: ExactQuote[] | string[];
   /** 覆盖型:故事内当前时间(直接写新值)。仅在正文无时间标签、需 AI 兜底时使用 */
   time?: string;
   /** 本段起始时间(仅正文缺 <bbs_start> 标签时让 AI 补) */

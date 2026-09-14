@@ -1,10 +1,7 @@
 /**
  * 从 LLM 文本输出里健壮地提取 JSON 对象。
  * 应对:```json 围栏、思维链前后缀、智能引号、尾随逗号。
- *
- * extractJsonObject:整段能解析才返回,一个字段坏就整段失败。
- * extractJsonObjectLoose:整段失败时按顶层字段隔离抢救——坏数组/坏对象丢掉,
- * 旁边的 summary / time 等合法字段仍写入。
+ * 整段能解析才返回:一个字段坏就整段失败,由调用方重试整楼。
  */
 
 function tryParse<T>(s: string): T | null {
@@ -12,14 +9,6 @@ function tryParse<T>(s: string): T | null {
     return JSON.parse(s) as T;
   } catch {
     return null;
-  }
-}
-
-function tryParseUnknown(s: string): { ok: true; value: unknown } | { ok: false } {
-  try {
-    return { ok: true, value: JSON.parse(s) };
-  } catch {
-    return { ok: false };
   }
 }
 
@@ -118,129 +107,8 @@ function parseJsonObjectStrict<T>(body: string): T | null {
   return tryParse<T>(escapeStrayQuotes(cleaned));
 }
 
-function skipWs(s: string, i: number): number {
-  while (i < s.length && /\s/.test(s[i])) i++;
-  return i;
-}
-
-/** 从 start 起切出一段 JSON 值原文(字符串 / 对象 / 数组 / 原子)。不平衡则返回 null。 */
-function extractJsonValue(s: string, start: number): { raw: string; end: number } | null {
-  const i = skipWs(s, start);
-  if (i >= s.length) return null;
-  const c = s[i];
-
-  if (c === '"') {
-    let j = i + 1;
-    while (j < s.length) {
-      if (s[j] === '\\') { j += 2; continue; }
-      if (s[j] === '"') return { raw: s.slice(i, j + 1), end: j + 1 };
-      j++;
-    }
-    return null;
-  }
-
-  if (c === '{' || c === '[') {
-    const close = c === '{' ? '}' : ']';
-    let depth = 0;
-    let inStr = false;
-    for (let j = i; j < s.length; j++) {
-      const ch = s[j];
-      if (inStr) {
-        if (ch === '\\') { j++; continue; }
-        if (ch === '"') inStr = false;
-        continue;
-      }
-      if (ch === '"') { inStr = true; continue; }
-      if (ch === c) depth++;
-      else if (ch === close) {
-        depth--;
-        if (depth === 0) return { raw: s.slice(i, j + 1), end: j + 1 };
-      }
-    }
-    return null;
-  }
-
-  let j = i;
-  while (j < s.length && !/[,}\]]/.test(s[j])) j++;
-  const raw = s.slice(i, j).trim();
-  return raw ? { raw, end: j } : null;
-}
-
-function salvageAny(raw: string): unknown | undefined {
-  const candidates = [raw, tidyJson(raw), escapeStrayQuotes(raw), escapeStrayQuotes(tidyJson(raw))];
-  for (const c of candidates) {
-    const parsed = tryParseUnknown(c);
-    if (parsed.ok) return parsed.value;
-  }
-  const t = tidyJson(raw).trim();
-  if (t.startsWith('{')) {
-    const obj = salvageTopLevelObject(t);
-    if (obj) return obj;
-  }
-  if (t.startsWith('[')) {
-    const arr = salvageArray(t);
-    if (arr) return arr;
-  }
-  return undefined;
-}
-
-function salvageArray(body: string): unknown[] | null {
-  const s = tidyJson(body).trim();
-  if (!s.startsWith('[')) return null;
-  const out: unknown[] = [];
-  let i = 1;
-  while (i < s.length) {
-    i = skipWs(s, i);
-    if (i >= s.length || s[i] === ']') break;
-    const ev = extractJsonValue(s, i);
-    if (!ev) break;
-    const v = salvageAny(ev.raw);
-    if (v !== undefined) out.push(v);
-    i = skipWs(s, ev.end);
-    if (s[i] === ',') i++;
-  }
-  return out;
-}
-
-function salvageTopLevelObject(body: string): Record<string, unknown> | null {
-  const s = tidyJson(body).trim();
-  if (!s.startsWith('{')) return null;
-  const out: Record<string, unknown> = {};
-  let i = 1;
-  while (i < s.length) {
-    i = skipWs(s, i);
-    if (i >= s.length || s[i] === '}') break;
-    const keyTok = extractJsonValue(s, i);
-    if (!keyTok) break;
-    const keyParsed = tryParseUnknown(keyTok.raw);
-    if (!keyParsed.ok || typeof keyParsed.value !== 'string') break;
-    i = skipWs(s, keyTok.end);
-    if (s[i] !== ':') break;
-    i++;
-    const valTok = extractJsonValue(s, i);
-    if (!valTok) break;
-    const v = salvageAny(valTok.raw);
-    if (v !== undefined) out[keyParsed.value] = v;
-    i = skipWs(s, valTok.end);
-    if (s[i] === ',') i++;
-  }
-  return Object.keys(out).length ? out : null;
-}
-
 export function extractJsonObject<T = unknown>(raw: string): T | null {
   const body = prepareJsonBody(raw);
   if (!body) return null;
   return parseJsonObjectStrict<T>(body);
-}
-
-/**
- * 先走严格提取;整段 JSON 坏掉时按字段隔离抢救。
- * 坏掉的数组/对象被丢掉,旁边能解析的字段仍返回。没有任何字段则 null。
- */
-export function extractJsonObjectLoose<T = unknown>(raw: string): T | null {
-  const body = prepareJsonBody(raw);
-  if (!body) return null;
-  const strict = parseJsonObjectStrict<T>(body);
-  if (strict !== null) return strict;
-  return salvageTopLevelObject(body) as T | null;
 }
