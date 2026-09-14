@@ -15,5 +15,15 @@ export function mergeProtagonistDelta(
   if (Object.prototype.hasOwnProperty.call(patch, 'age') && !Object.prototype.hasOwnProperty.call(patch, 'ageTime')) {
     delete merged.ageTime;
   }
+  const lock = uniqueStrings([...(current?.lock ?? []), ...(patch.lock ?? [])]);
+  const unlock = uniqueStrings([...(current?.unlock ?? []), ...(patch.unlock ?? [])]);
+  if (lock.length) merged.lock = lock;
+  else delete merged.lock;
+  if (unlock.length) merged.unlock = unlock;
+  else delete merged.unlock;
   return merged;
+}
+
+function uniqueStrings(list: string[]): string[] {
+  return [...new Set(list.filter(Boolean))];
 }

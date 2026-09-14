@@ -4,7 +4,7 @@ import { reactive } from 'vue';
 import { deriveMemory, getLeaf, leafBodyOutdated, leafValid } from './apply';
 import { isAiFloor, pendingAiFloors } from './engine';
 import { latestStoryTime } from './timeTag';
-import type { BaibaiMemory, LeafExtra, MemSummary, StoredDelta, VarTemplate, VarTier } from './types';
+import type { BaibaiMemory, LeafExtra, MemSummary, RawPrequel, StoredDelta, VarTemplate, VarTier } from './types';
 import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from './types';
 
 /**
@@ -67,6 +67,7 @@ export function recomputeDerived(): void {
   for (const key of ['gender', 'age', 'ageTime', 'identity', 'appearance', 'outfit', 'condition'] as const) {
     memory.protagonist[key] = d.protagonist[key];
   }
+  memory.protagonist.lockedFields = d.protagonist.lockedFields;
   memory.items.splice(0, memory.items.length, ...d.items);
   memory.plans.splice(0, memory.plans.length, ...d.plans);
   memory.scenes.splice(0, memory.scenes.length, ...d.scenes);
@@ -140,11 +141,13 @@ export function flushLeavesNow(): void {
 export function saveMemory() {
   const ctx = getContext();
   if (!ctx?.chatMetadata) return;
-  const snapshot: { version: number; summaries: MemSummary[]; varsTemplate: VarTemplate } = {
+  const snapshot: { version: number; summaries: MemSummary[]; varsTemplate: VarTemplate; rawPrequel?: RawPrequel } = {
     version: MEMORY_VERSION,
     summaries: JSON.parse(JSON.stringify(memory.summaries)),
     varsTemplate: JSON.parse(JSON.stringify(memory.varTemplates.chat)),
   };
+  const prequel = cleanRawPrequel(memory.rawPrequel);
+  if (prequel) snapshot.rawPrequel = prequel;
   (ctx.chatMetadata as Record<string, unknown>)[MEMORY_KEY] = snapshot;
   ctx.saveMetadataDebounced?.();
 }
@@ -296,6 +299,23 @@ function cleanSummaryNode(s: MemSummary, idx: number): MemSummary {
   };
 }
 
+function cleanRawPrequel(raw: unknown): RawPrequel | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Partial<RawPrequel>;
+  const text = typeof o.text === 'string' ? o.text.replace(/\r\n/g, '\n').trim() : '';
+  if (!text) return null;
+  return {
+    text,
+    updatedAt: typeof o.updatedAt === 'number' && Number.isFinite(o.updatedAt) ? o.updatedAt : Date.now(),
+  };
+}
+
+/** 粘贴或清空前情原文。只写 chatMetadata,不改叶子、不覆盖楼层。 */
+export function setRawPrequel(text: string): void {
+  memory.rawPrequel = cleanRawPrequel({ text, updatedAt: Date.now() });
+  saveMemory();
+}
+
 function assignForest(target: BaibaiMemory, summaries: MemSummary[], varTemplates: Record<VarTier, VarTemplate>) {
   target.version = MEMORY_VERSION;
   target.summaries = summaries.map(cleanSummaryNode);
@@ -343,6 +363,7 @@ export function loadMemory() {
   } else {
     assignForest(memory, [], varTemplates);
   }
+  memory.rawPrequel = cleanRawPrequel(raw?.rawPrequel);
   recomputeDerived();
 }
 

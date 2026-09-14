@@ -19,6 +19,15 @@ export const MEMORY_KEY = 'baibai_book';
 /** 3 = 混合架构(叶子在消息 extra);2 = 叶子也在森林;1 = 独立 items/plans/state */
 export const MEMORY_VERSION = 3;
 
+/** 知情边界。默认 shared;只影响注入标注,不另起存储。 */
+export type KnowledgeScope = 'private' | 'shared' | 'observable';
+
+/** 把两人合成同一名册条目:from 并入 into,from 的名字变成别名。 */
+export interface NpcMerge {
+  from: string;
+  into: string;
+}
+
 /**
  * 物品(派生产物,不持久化)。
  * id 是**确定性**的:`item:${规范化名}`,故重放每次得到同一 id,手动 op 可稳定引用。
@@ -195,6 +204,23 @@ export interface MemNpc {
   follow?: boolean;
   /** 定点时的所在地(故事内地名);follow≠true 时用于与当前地点匹配 */
   location?: string;
+  /**
+   * 同一人的其他称呼(昵称/化名/译名)。查找与提及匹配都认这些名字,
+   * 避免「小红 / 红红」裂成两条名册。
+   */
+  aliases?: string[];
+  /**
+   * 知情边界(轻量,不是 CSE):
+   *  - shared:相关人已知(默认,注入不特别标注)
+   *  - observable:在场可见的客观事实
+   *  - private:仅当事人/叙事者知情,注入标【私密】,勿在公开场合点破
+   */
+  visibility?: KnowledgeScope;
+  /**
+   * 人工锁:用户改过或显式锁住的字段名。后续摘要重放跳过这些字段,
+   * 删掉写下锁的叶子后自动回退。
+   */
+  lockedFields?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -219,6 +245,8 @@ export interface MemProtagonist {
   outfit?: string;
   /** 当前身体状态/健康(覆盖型;恢复正常后清空) */
   condition?: string;
+  /** 人工锁:用户改过的主角字段,后续摘要不覆盖 */
+  lockedFields?: string[];
 }
 
 /**
@@ -263,6 +291,8 @@ export interface MemPlan {
   createdTime?: string;
   /** 故事内「目标时间」(AI 直接输出,允许模糊值如「以后有机会」或留空) */
   targetTime?: string;
+  /** 知情边界:秘密任务/未公开悬念用 private;在场可察觉用 observable */
+  visibility?: KnowledgeScope;
 }
 
 /**
@@ -413,9 +443,15 @@ export interface LifeDetailUpdate {
   until?: string;
 }
 
+/** 粘贴的前情原文。进 chatMetadata,不进森林、不覆盖楼层。 */
+export interface RawPrequel {
+  text: string;
+  updatedAt: number;
+}
+
 /**
  * 顶层记忆对象。
- * **只有 version + summaries 是真源并持久化**;state / items / plans 是从 summaries
+ * **只有 version + summaries + rawPrequel 是真源并持久化**;state / items / plans 是从 summaries
  * 重放算出的派生缓存(供页面响应式读取,saveMemory 不写它们)。
  */
 export interface BaibaiMemory {
@@ -442,6 +478,8 @@ export interface BaibaiMemory {
   vars: Record<string, JsonValue>;
   /** 真源:叶子摘要森林 */
   summaries: MemSummary[];
+  /** 真源:粘贴的前情原文。召回时按相关抽段,不改已有叶子。 */
+  rawPrequel: RawPrequel | null;
 }
 
 export function createEmptyMemory(): BaibaiMemory {
@@ -458,6 +496,7 @@ export function createEmptyMemory(): BaibaiMemory {
     varTemplates: { global: { json: {}, meaning: '', rule: '' }, char: { json: {}, meaning: '', rule: '' }, chat: { json: {}, meaning: '', rule: '' } },
     vars: {},
     summaries: [],
+    rawPrequel: null,
   };
 }
 
@@ -503,6 +542,16 @@ export interface NpcDelta {
   follow?: boolean;
   /** 定点时的所在地(故事内地名) */
   location?: string;
+  /** 同一人的其他称呼;update 时与已有别名合并 */
+  aliases?: string[];
+  /** 知情边界 */
+  visibility?: KnowledgeScope;
+  /** 手动:追加锁字段。AI finalize 会剥掉,摘要不能锁人设。 */
+  lock?: string[];
+  /** 手动:解除锁字段 */
+  unlock?: string[];
+  /** 手动:整表替换锁集合 */
+  lockedFields?: string[];
 }
 
 /**
@@ -519,6 +568,9 @@ export interface ProtagonistDelta {
   appearance?: string;
   outfit?: string;
   condition?: string;
+  lock?: string[];
+  unlock?: string[];
+  lockedFields?: string[];
 }
 
 /** 场景指令里单个地点的形状(AI / 手动共用) */
@@ -597,11 +649,13 @@ export interface SummaryDelta {
     update?: NpcDelta[];
     /** 按名字移除(永久退场/死亡) */
     remove?: string[];
+    /** 把 from 并入 into;from 的名字变成别名 */
+    merge?: NpcMerge[];
   };
   /** 指令型:计划/悬念增删 */
   plans?: {
     /** createdTime/targetTime 由 AI 直接输出(故事内时间字符串);targetTime 允许模糊或省略 */
-    add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string }[];
+    add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: KnowledgeScope }[];
     /** 按提示词里展示的短 id(p1/p2…)了结,每项带 outcome/reason 说明怎么了结;裸字符串兼容旧格式 */
     resolve?: PlanResolveItem[];
   };
@@ -660,9 +714,11 @@ export interface StoredDelta {
     update?: NpcDelta[];
     /** 按 NPC 名移除(规范化匹配) */
     remove?: string[];
+    /** 手动/AI:把 from 并入 into */
+    merge?: NpcMerge[];
   };
   plans?: {
-    add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string }[];
+    add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: KnowledgeScope }[];
     /** 了结:稳定 plan id(带 outcome/reason);裸字符串兼容旧数据 */
     resolve?: PlanResolveItem[];
     /** 内部/手动:删除 plan(稳定 id) */

@@ -212,7 +212,13 @@ export const RULE_NPCS = `═══ 【NPC 规则】(npcs 字段,极严筛选) �
   ✦ 目的:避免「两人分开两天重逢,对方还穿着分别时那套、伤还没好」这种僵化。
   ✦ 严格边界:此推演**仅限主要角色、仅限 outfit/location/condition 三个覆盖型字段**;**绝不可**外溢到 summary 正文、items、计划,也不可用于普通配角——那些仍严格只记正文明写,禁止脑补。推演要符合常理、点到为止,不要编造具体剧情事件。
 【退场(remove)】NPC 永久退场(死亡、彻底离开剧情且不会再出现)才 remove;只是暂时分开、去了别处用 location/follow 表达,不要 remove。
-【复用已有,严禁重复】上方【已登场NPC】是已记录名册。同一角色务必复用既有名字,不要换个叫法再记一遍;已在名册里且无变化 → 不输出 npcs。`;
+【复用已有,严禁重复】上方【已登场NPC】是已记录名册。同一角色务必复用既有名字,不要换个叫法再记一遍;已在名册里且无变化 → 不输出 npcs。
+【别名 / 合并】同一人的昵称、化名、译名写入 aliases(字符串数组),不要另开一条 add。名册里已有两人实为同一人 → npcs.merge:[{"from":"红红","into":"小红"}],from 并入 into,from 的名字变成别名。
+【知情边界】visibility 三选一,省略=shared:
+  · shared:相关人已知(默认);
+  · observable:在场可见的客观事实(外貌/公开身份);
+  · private:仅当事人或叙事者知情的秘密(私密身份、未说出口的把柄)。私密条目会标【私密】,后续正文勿在公开场合点破。
+【人工锁】名册里标了「已锁」的字段禁止 update。那是用户改过的人设,以已锁为准。`;
 
 /** 互动局势卡规则(sceneFocus 字段)。 */
 export const RULE_SCENE_FOCUS = `═══ 【互动局势卡规则】(sceneFocus 字段,覆盖型单对象) ═══
@@ -289,7 +295,8 @@ reason 必填一句,写清「为什么了结 / 如何收场」。⚠️最易错
 【计划时间】每条 plans.add 都要带 createdTime(该计划/悬念在剧情里被立下/出现时的故事内时间,取本段当前时间即可,用具体数字化日期时间);计划(plan)还应带 targetTime(打算去做/兑现的目标时间):
   · 有明确期限→写具体时间(如"放学后""1988/10/1");
   · 是泛泛的愿望、无明确期限(如"以后有机会一定要去看看")→targetTime 可写模糊描述或直接省略该字段。
-  · 悬念(suspense)通常没有目标时间,可省略 targetTime。`;
+  · 悬念(suspense)通常没有目标时间,可省略 targetTime。
+【知情边界】秘密任务、未公开的悬念加 visibility:"private";在场可察觉但不必人人皆知用 "observable";默认省略(=shared)。`;
 
 /**
  * 自定义变量规则(vars 字段,路径命令)。仅当用户配置了变量(有当前状态或说明)时才注入(见 {{vars_rule}})。
@@ -644,9 +651,9 @@ interface BuildArgs {
   /** 已知地点(完整路径 + 描述,供 AI 复用命名、防重复记录、判断 reparent) */
   scenes: { path: string[]; desc?: string }[];
   /** 已登场 NPC(供 AI 复用命名、防重复记录、判断状态更新) */
-  npcs: { name: string; gender?: string; age?: string; ageTime?: string; relation?: string; ties?: string; title?: string; important?: boolean; outfit?: string; condition?: string; follow?: boolean; location?: string }[];
+  npcs: { name: string; gender?: string; age?: string; ageTime?: string; relation?: string; ties?: string; title?: string; important?: boolean; outfit?: string; condition?: string; follow?: boolean; location?: string; aliases?: string[]; visibility?: 'private' | 'shared' | 'observable'; lockedFields?: string[] }[];
   /** 未了结计划(顺序即编号 p1..pn);createdTime/targetTime 为故事内时间(可空) */
-  openPlans: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string }[];
+  openPlans: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: 'private' | 'shared' | 'observable' }[];
   /** 近期已完成的计划/悬念(已按 resolvedAt 倒序取好最近 N 条);防副模型重复记录。空数组→渲染「(无)」 */
   resolvedPlans: MemPlan[];
   /** 本轮之前的历史摘要文本(已选「最高压缩层」节点拼接);空表示无前情 */
@@ -853,7 +860,8 @@ export function fmtPlans(plans: BuildArgs['openPlans']): string {
       if (p.createdTime?.trim()) parts.push(`立于 ${p.createdTime.trim()}`);
       if (p.targetTime?.trim()) parts.push(`目标 ${p.targetTime.trim()}`);
       const time = parts.length ? `(${parts.join(' · ')})` : '';
-      return `  p${idx + 1}. [${p.kind === 'suspense' ? '悬念' : '计划'}] ${oneLine(p.content)}${time}`;
+      const vis = p.visibility === 'private' ? '·私密' : p.visibility === 'observable' ? '·可见' : '';
+      return `  p${idx + 1}. [${p.kind === 'suspense' ? '悬念' : '计划'}${vis}] ${oneLine(p.content)}${time}`;
     })
     .join('\n');
 }

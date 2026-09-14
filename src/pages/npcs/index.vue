@@ -4,10 +4,12 @@ import Icon from '@/components/Icon.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import SummaryOnlyNotice from '@/components/SummaryOnlyNotice.vue';
-import { classifyNpcPresence, editNpc, removeNpc, setNpcFollow, setNpcImportant, setProtagonist, upsertNpc, addLifeDetail, removeLifeDetail, updateLifeDetail } from '@/memory/apply';
+import { classifyNpcPresence, editNpc, mergeNpc, removeNpc, setNpcFollow, setNpcImportant, setProtagonist, upsertNpc, addLifeDetail, removeLifeDetail, updateLifeDetail } from '@/memory/apply';
+import { lockFieldLabels } from '@/memory/fieldLock';
+import { visibilityLabel } from '@/memory/npcIdentity';
 import { derivedMeta, memory } from '@/memory/store';
 import { ageDisplay } from '@/memory/timeRel';
-import type { MemLifeDetail, MemNpc } from '@/memory/types';
+import type { KnowledgeScope, MemLifeDetail, MemNpc } from '@/memory/types';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { computed, nextTick, ref } from 'vue';
@@ -18,7 +20,7 @@ const protagonistName = computed(() => {
   void derivedMeta.rev;
   return getContext()?.name1?.trim() || '主角';
 });
-const protagonistHasData = computed(() => Object.values(memory.protagonist).some(value => !!value?.trim()));
+const protagonistHasData = computed(() => Object.values(memory.protagonist).some(value => typeof value === 'string' && !!value.trim()));
 const protagonistHasDetails = computed(() => [
   memory.protagonist.age,
   memory.protagonist.identity,
@@ -45,6 +47,7 @@ interface ProtagonistDraft {
   appearance: string;
   outfit: string;
   condition: string;
+  unlock: string[];
 }
 const protagonistEditing = ref<ProtagonistDraft | null>(null);
 
@@ -57,6 +60,7 @@ function openProtagonistEdit() {
     appearance: memory.protagonist.appearance ?? '',
     outfit: memory.protagonist.outfit ?? '',
     condition: memory.protagonist.condition ?? '',
+    unlock: [],
   };
 }
 function cancelProtagonistEdit() {
@@ -67,7 +71,27 @@ function saveProtagonistEdit() {
   if (!draft) return;
   // 年龄没改时带上旧锚点,防止重放把锚点刷成「此刻」(等于错误冻龄);真改了才留给重放盖新锚点
   const ageTime = draft.age.trim() && draft.age.trim() === memory.protagonist.age ? memory.protagonist.ageTime : undefined;
-  if (setProtagonist({ ...draft, ageTime })) protagonistEditing.value = null;
+  if (setProtagonist({ ...draft, ageTime, unlock: draft.unlock })) protagonistEditing.value = null;
+}
+
+function unlockProtagonist(field: string) {
+  if (!protagonistEditing.value) return;
+  const next = new Set(protagonistEditing.value.unlock);
+  next.add(field);
+  protagonistEditing.value.unlock = [...next];
+}
+
+function parseAliases(raw: string): string[] {
+  return raw.split(/[/／、,，;；]/).map(s => s.trim()).filter(Boolean);
+}
+
+function npcMeta(n: MemNpc): string {
+  const parts: string[] = [];
+  if (n.aliases?.length) parts.push(`亦称 ${n.aliases.join(' / ')}`);
+  const vis = visibilityLabel(n.visibility);
+  if (vis) parts.push(vis);
+  if (n.lockedFields?.length) parts.push(`已锁 ${lockFieldLabels(n.lockedFields)}`);
+  return parts.join(' · ');
 }
 
 /* —— 生活小档案(三投放层:置顶常驻 / 时效相关浮现 / 沉降仅触发)—— */
@@ -216,9 +240,11 @@ interface NpcDraft {
   important: boolean;
   follow: boolean;
   location: string;
+  aliases: string;
+  visibility: KnowledgeScope | '';
 }
 function emptyDraft(): NpcDraft {
-  return { name: '', gender: '', age: '', relation: '', ties: '', title: '', personality: '', desc: '', outfit: '', condition: '', important: false, follow: false, location: memory.state.location || '' };
+  return { name: '', gender: '', age: '', relation: '', ties: '', title: '', personality: '', desc: '', outfit: '', condition: '', important: false, follow: false, location: memory.state.location || '', aliases: '', visibility: '' };
 }
 const draft = ref<NpcDraft>(emptyDraft());
 
@@ -248,6 +274,8 @@ function addNpc() {
     important: d.important,
     follow: d.follow,
     location: d.follow ? '' : d.location,
+    aliases: parseAliases(d.aliases),
+    visibility: d.visibility || undefined,
   });
   if (!ok) return;
   composerOpen.value = false;
@@ -256,6 +284,8 @@ function addNpc() {
 /* —— 编辑弹窗 —— */
 interface NpcEditing extends NpcDraft {
   oldName: string;
+  mergeInto: string;
+  unlock: string[];
 }
 const editing = ref<NpcEditing | null>(null);
 
@@ -275,6 +305,10 @@ function openEdit(npc: MemNpc) {
     important: npc.important === true,
     follow: npc.follow === true,
     location: npc.location ?? '',
+    aliases: (npc.aliases ?? []).join(' / '),
+    visibility: npc.visibility ?? '',
+    mergeInto: '',
+    unlock: [],
   };
 }
 function cancelEdit() {
@@ -297,9 +331,32 @@ function saveEdit() {
     important: e.important,
     follow: e.follow,
     location: e.follow ? '' : e.location,
+    aliases: parseAliases(e.aliases),
+    visibility: e.visibility,
+    unlock: e.unlock,
   });
+  if (e.mergeInto.trim()) mergeNpc(e.name.trim() || e.oldName, e.mergeInto.trim());
   editing.value = null;
 }
+
+function unlockNpcField(field: string) {
+  if (!editing.value) return;
+  const next = new Set(editing.value.unlock);
+  next.add(field);
+  editing.value.unlock = [...next];
+}
+
+const mergeTargets = computed(() => {
+  const current = editing.value?.oldName;
+  return memory.npcs.filter(n => n.name !== current);
+});
+const editingUnlockable = computed(() => {
+  const e = editing.value;
+  if (!e) return [];
+  const prev = memory.npcs.find(n => n.name === e.oldName);
+  return prev?.lockedFields ?? [];
+});
+const protagonistUnlockable = computed(() => memory.protagonist.lockedFields ?? []);
 
 /* —— 删除确认 —— */
 const removing = ref<MemNpc | null>(null);
@@ -407,6 +464,7 @@ function confirmRemove() {
             <span class="bbs-npc-name" :title="protagonistName">{{ protagonistName }}</span>
             <span v-if="memory.protagonist.gender" class="bbs-npc-gender">{{ memory.protagonist.gender }}</span>
             <span v-if="protagonistAge" class="bbs-npc-gender" :title="ageTitle(memory.protagonist.age, memory.protagonist.ageTime)">{{ protagonistAge }}</span>
+            <span v-if="memory.protagonist.lockedFields?.length" class="bbs-npc-extra" :title="lockFieldLabels(memory.protagonist.lockedFields, 'protagonist')">已锁 {{ lockFieldLabels(memory.protagonist.lockedFields, 'protagonist') }}</span>
             <span class="bbs-npc-acts">
               <button
                 class="bbs-item-act"
@@ -446,6 +504,7 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
+                <span v-if="npcMeta(n)" class="bbs-npc-extra">{{ npcMeta(n) }}</span>
                 <span class="bbs-npc-acts">
                   <button class="bbs-item-act bbs-npc-star active" type="button" title="主要角色 · 点击取消" @click="toggleImportant(n)"><Icon name="star" /></button>
                   <button class="bbs-item-act" type="button" title="编辑" @click="openEdit(n)"><Icon name="edit" /></button>
@@ -483,6 +542,7 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
+                <span v-if="npcMeta(n)" class="bbs-npc-extra">{{ npcMeta(n) }}</span>
                 <span class="bbs-npc-acts">
                   <button
                     class="bbs-item-act bbs-npc-star"
@@ -538,6 +598,7 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
+                <span v-if="npcMeta(n)" class="bbs-npc-extra">{{ npcMeta(n) }}</span>
                 <span class="bbs-npc-acts">
                   <button
                     class="bbs-item-act bbs-npc-star"
@@ -585,6 +646,7 @@ function confirmRemove() {
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
                 <span v-if="n.gender" class="bbs-npc-gender">{{ n.gender }}</span>
                 <span v-if="shownAge(n.age, n.ageTime)" class="bbs-npc-gender" :title="ageTitle(n.age, n.ageTime)">{{ shownAge(n.age, n.ageTime) }}</span>
+                <span v-if="npcMeta(n)" class="bbs-npc-extra">{{ npcMeta(n) }}</span>
                 <span class="bbs-npc-acts">
                   <button
                     class="bbs-item-act bbs-npc-star"
@@ -656,6 +718,21 @@ function confirmRemove() {
           <span class="bbs-modal-label">当前身体状态 / 健康</span>
           <textarea v-model="protagonistEditing.condition" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="无异常时留空"></textarea>
         </label>
+        <div v-if="protagonistUnlockable.length" class="bbs-modal-field">
+          <span class="bbs-modal-label">已锁字段(点开锁后,下次摘要可以改)</span>
+          <div class="bbs-lock-chips">
+            <button
+              v-for="field in protagonistUnlockable"
+              :key="field"
+              class="bbs-lock-chip"
+              type="button"
+              :class="{ 'is-off': protagonistEditing.unlock.includes(field) }"
+              @click="unlockProtagonist(field)"
+            >
+              <Icon name="lock" /> {{ lockFieldLabels([field], 'protagonist') }}
+            </button>
+          </div>
+        </div>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelProtagonistEdit">取消</button>
           <button class="bbs-btn bbs-btn-primary" type="button" @click="saveProtagonistEdit">保存</button>
@@ -703,6 +780,18 @@ function confirmRemove() {
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">名字</span>
           <input ref="nameInput" v-model="draft.name" class="bbs-input" type="text" placeholder="角色名" @keydown.enter="addNpc" />
+        </label>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">别名(昵称/化名,斜杠分隔)</span>
+          <input v-model="draft.aliases" class="bbs-input" type="text" placeholder="如 红红 / 小红红" />
+        </label>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">知情边界</span>
+          <select v-model="draft.visibility" class="bbs-input">
+            <option value="">已知(默认)</option>
+            <option value="observable">在场可见</option>
+            <option value="private">私密(勿在公开场合点破)</option>
+          </select>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性别</span>
@@ -772,6 +861,41 @@ function confirmRemove() {
           <span class="bbs-modal-label">名字</span>
           <input v-model="editing.name" class="bbs-input" type="text" placeholder="角色名" />
         </label>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">别名(昵称/化名,斜杠分隔)</span>
+          <input v-model="editing.aliases" class="bbs-input" type="text" placeholder="如 红红 / 小红红" />
+        </label>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">知情边界</span>
+          <select v-model="editing.visibility" class="bbs-input">
+            <option value="">已知(默认)</option>
+            <option value="observable">在场可见</option>
+            <option value="private">私密(勿在公开场合点破)</option>
+          </select>
+        </label>
+        <label v-if="mergeTargets.length" class="bbs-modal-field">
+          <span class="bbs-modal-label">合并到另一角色(可选,把当前人并入对方)</span>
+          <select v-model="editing.mergeInto" class="bbs-input">
+            <option value="">不合并</option>
+            <option v-for="n in mergeTargets" :key="n.id" :value="n.name">{{ n.name }}</option>
+          </select>
+        </label>
+        <div v-if="editingUnlockable.length" class="bbs-modal-field">
+          <span class="bbs-modal-label">已锁字段(点开锁后,下次摘要可以改)</span>
+          <div class="bbs-lock-chips">
+            <button
+              v-for="field in editingUnlockable"
+              :key="field"
+              class="bbs-lock-chip"
+              type="button"
+              :class="{ 'is-off': editing.unlock.includes(field) }"
+              :title="editing.unlock.includes(field) ? '将解锁' : '点击解锁'"
+              @click="unlockNpcField(field)"
+            >
+              <Icon name="lock" /> {{ lockFieldLabels([field]) }}
+            </button>
+          </div>
+        </div>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性别</span>
           <input v-model="editing.gender" class="bbs-input" type="text" placeholder="如:男、女" />
@@ -1001,6 +1125,35 @@ function confirmRemove() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.bbs-npc-extra {
+  font-size: 11px;
+  color: var(--bbs-ink-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 8em;
+}
+.bbs-lock-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.bbs-lock-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--bbs-line);
+  background: var(--bbs-surface-2);
+  color: var(--bbs-ink-muted);
+  border-radius: var(--bbs-radius-pill);
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.bbs-lock-chip.is-off {
+  opacity: 0.45;
+  text-decoration: line-through;
 }
 .bbs-npc-name {
   font-size: 14px;

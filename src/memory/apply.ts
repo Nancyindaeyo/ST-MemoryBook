@@ -7,8 +7,12 @@ import { memory, recomputeDerived, saveMemory, scheduleLeafFlush } from './store
 import { cleanBody, readItemsTagText, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
+import { applyLockPatch, changedLockableFields, cleanNpcLockFields, cleanProtagonistLockFields, isLocked, PROTAGONIST_LOCKABLE_FIELDS } from './fieldLock';
+import { applyNpcBook, cleanKnowledgeScope, findNpc, npcId, stripManualNpcLocks } from './npcIdentity';
 import { createEmptyMemory } from './types';
-import type { BaibaiMemory, ItemDelta, ItemLogEntry, JsonValue, LeafExtra, LifeDetailAdd, LifeDetailUpdate, MemLifeDetail, MemNpc, MemPlan, MemScene, MemSummary, NpcDelta, PlanResolveItem, ProtagonistDelta, SceneDelta, SceneFocus, SceneOp, SceneReparent, StoredDelta, SummaryDelta, VarOp, VarTemplate, VarTier } from './types';
+import type { BaibaiMemory, ItemDelta, ItemLogEntry, JsonValue, KnowledgeScope, LeafExtra, LifeDetailAdd, LifeDetailUpdate, MemLifeDetail, MemNpc, MemPlan, MemScene, MemSummary, NpcDelta, NpcMerge, PlanResolveItem, ProtagonistDelta, SceneDelta, SceneFocus, SceneOp, SceneReparent, StoredDelta, SummaryDelta, VarOp, VarTemplate, VarTier } from './types';
+
+export { findNpc, npcId } from './npcIdentity';
 
 let idSeq = 0;
 /** 生成稳定唯一 id(不依赖 random;时间走 nowMs 便于测试注入) */
@@ -188,7 +192,36 @@ function cleanNpcDelta(raw: unknown): NpcDelta | null {
     important: optBool(raw.important),
     follow: optBool(raw.follow),
     location: optText(raw.location),
+    aliases: cleanAliasList(raw.aliases),
+    visibility: cleanKnowledgeScope(raw.visibility),
+    lock: cleanNpcLockFields(raw.lock),
+    unlock: cleanNpcLockFields(raw.unlock),
+    lockedFields: raw.lockedFields !== undefined ? cleanNpcLockFields(raw.lockedFields) : undefined,
   };
+}
+
+function cleanAliasList(raw: unknown): string[] | undefined {
+  const fromString = typeof raw === 'string'
+    ? raw.split(/[/／、,，;；]/).map(s => s.trim()).filter(Boolean)
+    : [];
+  const fromList = Array.isArray(raw) ? cleanTextList(raw, ['name', 'alias']) : [];
+  const out = [...fromString, ...fromList].filter((name, i, all) => all.findIndex(x => norm(x) === norm(name)) === i);
+  return out.length ? out : undefined;
+}
+
+function dropEmptyLock(list: string[] | undefined): string[] | undefined {
+  return list?.length ? list : undefined;
+}
+
+function cleanNpcMerge(raw: unknown): NpcMerge | null {
+  if (!isRecord(raw)) return null;
+  const from = namedText(raw, ['from', 'source', 'old']);
+  const into = namedText(raw, ['into', 'target', 'to']);
+  return from && into && norm(from) !== norm(into) ? { from, into } : null;
+}
+
+function cleanNpcMergeList(v: unknown): NpcMerge[] {
+  return arr(v).map(cleanNpcMerge).filter((x): x is NpcMerge => !!x);
 }
 
 function cleanNpcList(v: unknown): NpcDelta[] {
@@ -262,10 +295,18 @@ function cleanProtagonistDelta(raw: unknown): ProtagonistDelta | null {
     const value = patchText(raw[key]);
     if (value !== undefined) out[key] = value;
   }
+  const lock = dropEmptyLock(cleanProtagonistLockFields(raw.lock));
+  const unlock = dropEmptyLock(cleanProtagonistLockFields(raw.unlock));
+  if (lock) out.lock = lock;
+  if (unlock) out.unlock = unlock;
+  if (raw.lockedFields !== undefined) {
+    const lockedFields = dropEmptyLock(cleanProtagonistLockFields(raw.lockedFields));
+    if (lockedFields) out.lockedFields = lockedFields;
+  }
   return Object.keys(out).length ? out : null;
 }
 
-type PlanAdd = { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string };
+type PlanAdd = { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: KnowledgeScope };
 
 function cleanPlanAdd(raw: unknown): PlanAdd | null {
   if (!isRecord(raw)) {
@@ -274,11 +315,13 @@ function cleanPlanAdd(raw: unknown): PlanAdd | null {
   }
   const content = namedText(raw, ['content', 'text', 'name']);
   if (!content) return null;
+  const visibility = cleanKnowledgeScope(raw.visibility);
   return {
     kind: raw.kind === 'suspense' ? 'suspense' : 'plan',
     content,
     createdTime: optText(raw.createdTime),
     targetTime: optText(raw.targetTime),
+    ...(visibility ? { visibility } : {}),
   };
 }
 
@@ -346,9 +389,11 @@ function cleanStoredDelta(raw: StoredDelta): StoredDelta {
     const add = cleanNpcList(raw.npcs.add);
     const update = cleanNpcList(raw.npcs.update);
     const remove = cleanTextList(raw.npcs.remove, ['name', 'npc', 'id']);
+    const merge = cleanNpcMergeList(raw.npcs.merge);
     if (add.length) npcs.add = add;
     if (update.length) npcs.update = update;
     if (remove.length) npcs.remove = remove;
+    if (merge.length) npcs.merge = merge;
     if (Object.keys(npcs).length) out.npcs = npcs;
   }
 
@@ -388,10 +433,6 @@ function cleanStoredDelta(raw: StoredDelta): StoredDelta {
 /** 物品 id:按规范化名,故重放幂等、手动 op 可稳定引用 */
 export function itemId(name: string): string {
   return `item:${norm(name)}`;
-}
-/** NPC id:按规范化名,故重放幂等、手动 op 可稳定引用 */
-export function npcId(name: string): string {
-  return `npc:${norm(name)}`;
 }
 /** 计划 id:产生它的叶子 id + 在该叶子 add 数组里的序号 */
 export function planId(leafId: string, addIndex: number): string {
@@ -773,12 +814,14 @@ function applyAge(n: { age?: string; ageTime?: string }, src: { age?: string; ag
   }
 }
 
-/** 主角档案是纯覆盖快照;空字符串表示清除旧值。年龄走锚点机制(applyAge)。 */
+/** 主角档案是纯覆盖快照;空字符串表示清除旧值。年龄走锚点机制(applyAge)。已锁字段跳过。 */
 function applyProtagonistState(target: BaibaiMemory['protagonist'], src: ProtagonistDelta, storyTime: string): void {
+  const locked = target.lockedFields;
   for (const key of ['gender', 'identity', 'appearance', 'outfit', 'condition'] as const) {
-    if (typeof src[key] === 'string') target[key] = src[key]!.trim() || undefined;
+    if (typeof src[key] === 'string' && !isLocked(locked, key)) target[key] = src[key]!.trim() || undefined;
   }
-  applyAge(target, src, storyTime);
+  if (!isLocked(locked, 'age')) applyAge(target, src, storyTime);
+  target.lockedFields = applyLockPatch(target.lockedFields, src);
 }
 
 /**
@@ -1251,84 +1294,9 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
     }
   }
 
-  // NPC(指令型:add 新登场 / update 改身份位置 / remove 退场)。施加序:add → update → remove。
-  // update 对不存在的名字按 upsert 创建,兼容迁移后名册为空、但后续摘要误产 update 的历史数据。
+  // NPC:add → update → merge → remove。查找认主名和别名;已锁字段由 applyNpcBook 跳过。
   if (d.npcs) {
-    // 年龄锚点用「本叶子的故事内时间」;叶子无时间则退当前状态时间(delta.time 已在上方生效)
-    const npcTime = logTime || mem.state.time;
-    for (const add of d.npcs.add ?? []) {
-      if (!add?.name?.trim()) continue;
-      const id = npcId(add.name);
-      const ex = mem.npcs.find(n => n.id === id);
-      if (ex) {
-        // 已存在:档案层(gender/title/desc/性格/关系)add 视作补全(仅填空,不覆盖既有);
-        // 即时层(outfit/condition/important)仍直接覆盖(它本就是当前快照),再施加位置。
-        // 年龄同为「仅填空」:重复 add 多是复述旧信息,若覆盖会把锚点错误刷新到当前时间(冻龄);
-        // 真正的年龄变化(过生日/纠正)走 update。
-        if (add.gender && !ex.gender) ex.gender = add.gender.trim();
-        if (add.age && !ex.age) applyAge(ex, add, npcTime);
-        if (add.relation && !ex.relation) ex.relation = add.relation.trim();
-        if (add.ties && !ex.ties) ex.ties = add.ties.trim();
-        if (add.title && !ex.title) ex.title = add.title.trim();
-        if (add.desc && !ex.desc) ex.desc = add.desc.trim();
-        if (add.personality && !ex.personality) ex.personality = add.personality.trim();
-        applyNpcState(ex, add);
-        applyNpcPlacement(ex, add);
-        ex.updatedAt = t;
-      } else {
-        const npc: BaibaiMemory['npcs'][number] = {
-          id,
-          name: add.name.trim(),
-          gender: add.gender?.trim() || undefined,
-          relation: add.relation?.trim() || undefined,
-          ties: add.ties?.trim() || undefined,
-          title: add.title?.trim() || undefined,
-          desc: add.desc?.trim() || undefined,
-          personality: add.personality?.trim() || undefined,
-          createdAt: t,
-          updatedAt: t,
-        };
-        applyAge(npc, add, npcTime);
-        applyNpcState(npc, add);
-        applyNpcPlacement(npc, add);
-        mem.npcs.push(npc);
-      }
-    }
-    for (const upd of d.npcs.update ?? []) {
-      if (!upd?.name?.trim()) continue;
-      const id = npcId(upd.name);
-      let n = mem.npcs.find(x => x.id === id);
-      if (!n) {
-        n = {
-          id,
-          name: upd.name.trim(),
-          gender: upd.gender?.trim() || undefined,
-          relation: upd.relation?.trim() || undefined,
-          ties: upd.ties?.trim() || undefined,
-          title: upd.title?.trim() || undefined,
-          desc: upd.desc?.trim() || undefined,
-          personality: upd.personality?.trim() || undefined,
-          createdAt: t,
-          updatedAt: t,
-        };
-        mem.npcs.push(n);
-      }
-      if (upd.gender) n.gender = upd.gender.trim();
-      applyAge(n, upd, npcTime); // 年龄覆盖 + 锚点自动刷新(过生日/纠正)
-      if (upd.relation) n.relation = upd.relation.trim();
-      if (upd.ties) n.ties = upd.ties.trim();
-      if (upd.title) n.title = upd.title.trim();
-      if (upd.desc) n.desc = upd.desc.trim();
-      if (upd.personality) n.personality = upd.personality.trim();
-      applyNpcState(n, upd); // 即时层(着装/状态/重要性)覆盖刷新
-      applyNpcPlacement(n, upd); // 随行/所在地变更(NPC 移动)
-      n.updatedAt = t;
-    }
-    for (const name of d.npcs.remove ?? []) {
-      if (!name?.trim()) continue;
-      const idx = mem.npcs.findIndex(x => x.id === npcId(name));
-      if (idx >= 0) mem.npcs.splice(idx, 1);
-    }
+    applyNpcBook(mem.npcs, d.npcs, { t, storyTime: logTime || mem.state.time });
   }
 
   // 计划 / 悬念
@@ -1345,6 +1313,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
         createdAt: t,
         createdTime: add.createdTime?.trim() || undefined,
         targetTime: add.targetTime?.trim() || undefined,
+        visibility: add.visibility,
       };
       mem.plans.push(plan);
     });
@@ -1586,7 +1555,11 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
   const sceneFocus = cleanSceneFocus(delta.sceneFocus);
   if (sceneFocus !== undefined) out.sceneFocus = sceneFocus;
   const protagonist = cleanProtagonistDelta(delta.protagonist);
-  if (protagonist) out.protagonist = protagonist;
+  if (protagonist) {
+    // 摘要不能改锁:用户锁的字段只由手动 op 写入
+    const { lock: _lock, unlock: _unlock, lockedFields: _lockedFields, ...rest } = protagonist;
+    if (Object.keys(rest).length) out.protagonist = rest;
+  }
 
   if (isRecord(delta.items)) {
     const items: NonNullable<StoredDelta['items']> = {};
@@ -1612,14 +1585,16 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
   }
 
   if (isRecord(delta.npcs)) {
-    // 规范化:add/update 必须有名字才保留(无名 NPC 不记)
+    // 规范化:add/update 必须有名字才保留(无名 NPC 不记)。锁字段剥掉,别名/知情/合并保留。
     const npcs: NonNullable<StoredDelta['npcs']> = {};
-    const add = cleanNpcList(delta.npcs.add);
-    const update = cleanNpcList(delta.npcs.update);
+    const add = cleanNpcList(delta.npcs.add).map(stripManualNpcLocks);
+    const update = cleanNpcList(delta.npcs.update).map(stripManualNpcLocks);
     const remove = cleanTextList(delta.npcs.remove, ['name', 'npc', 'id']);
+    const merge = cleanNpcMergeList(delta.npcs.merge);
     if (add.length) npcs.add = add;
     if (update.length) npcs.update = update;
     if (remove.length) npcs.remove = remove;
+    if (merge.length) npcs.merge = merge;
     if (Object.keys(npcs).length) out.npcs = npcs;
   }
 
@@ -1775,7 +1750,7 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
     if (di.remove && !di.remove.length) delete di.remove;
   }
   if (op.npcs) {
-    if (op.npcs.add?.length || op.npcs.update?.length || op.npcs.remove?.length) changed = true;
+    if (op.npcs.add?.length || op.npcs.update?.length || op.npcs.remove?.length || op.npcs.merge?.length) changed = true;
     // 与物品同款跨桶互斥:同名 NPC 在 add/update 与 remove 之间不能并存,
     // 否则改名(remove旧+add新)往返会让 remove 桶残留旧名,重放按 add→update→remove 把刚 add 的删掉。
     const dn = (d.npcs ??= {});
@@ -1793,9 +1768,11 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
       if (dn.remove) dn.remove = dn.remove.filter(n => npcId(n) !== npcId(u.name));
       (dn.update ??= []).push(u);
     }
+    if (op.npcs.merge?.length) (dn.merge ??= []).push(...op.npcs.merge);
     if (dn.add && !dn.add.length) delete dn.add;
     if (dn.update && !dn.update.length) delete dn.update;
     if (dn.remove && !dn.remove.length) delete dn.remove;
+    if (dn.merge && !dn.merge.length) delete dn.merge;
   }
   if (op.scenes) {
     if (
@@ -1859,10 +1836,17 @@ export function setVarsRoot(newJson: Record<string, JsonValue>): boolean {
   return appendOpToLatestLeaf({ varOps: [{ op: 'set', path: '', value: newJson }] });
 }
 
-/** 手动覆盖主角当前档案。空字符串会清除对应旧值。 */
+/** 手动覆盖主角当前档案。空字符串会清除对应旧值。改过的字段自动上锁。 */
 export function setProtagonist(patch: ProtagonistDelta): boolean {
   const clean = cleanProtagonistDelta(patch);
-  return clean ? appendOpToLatestLeaf({ protagonist: clean }) : false;
+  if (!clean) return false;
+  const lock = changedLockableFields(
+    memory.protagonist as unknown as Record<string, unknown>,
+    clean as unknown as Record<string, unknown>,
+    PROTAGONIST_LOCKABLE_FIELDS,
+  );
+  if (lock.length) clean.lock = [...new Set([...(clean.lock ?? []), ...lock])];
+  return appendOpToLatestLeaf({ protagonist: clean });
 }
 
 /** 手动添加一条生活细节(挂在最新叶子;新条目进 active 层)。无有效叶子时返回 false。 */
@@ -1941,6 +1925,8 @@ export function upsertNpc(
     important?: boolean;
     follow?: boolean;
     location?: string;
+    aliases?: string[];
+    visibility?: KnowledgeScope;
   },
 ): boolean {
   const name = fields.name.trim();
@@ -1961,6 +1947,8 @@ export function upsertNpc(
         important: fields.important,
         follow: fields.follow,
         location: fields.location?.trim() || undefined,
+        aliases: fields.aliases,
+        visibility: fields.visibility,
       }],
     },
   });
@@ -1989,6 +1977,10 @@ export function editNpc(
     important?: boolean;
     follow?: boolean;
     location?: string;
+    aliases?: string[];
+    visibility?: KnowledgeScope | '';
+    lock?: string[];
+    unlock?: string[];
   },
 ): boolean {
   const newName = patch.name?.trim() || oldName;
@@ -2000,25 +1992,52 @@ export function editNpc(
   const personality = patch.personality?.trim() || undefined;
 
   // 位置 / 即时层:patch 明确给了用 patch 的;否则从旧 NPC 继承(改名不丢所在地/随行/状态/重要性)
-  const prev = memory.npcs.find(n => n.id === npcId(oldName));
+  const prev = findNpc(memory.npcs, oldName);
   const follow = patch.follow !== undefined ? patch.follow : prev?.follow;
   const location = patch.location !== undefined ? (patch.location.trim() || undefined) : prev?.location;
   const outfit = patch.outfit !== undefined ? (patch.outfit.trim() || undefined) : prev?.outfit;
   const condition = patch.condition !== undefined ? (patch.condition.trim() || undefined) : prev?.condition;
   const important = patch.important !== undefined ? patch.important : prev?.important;
+  const aliases = patch.aliases ?? prev?.aliases;
+  const visibility: KnowledgeScope | undefined = patch.visibility !== undefined
+    ? (patch.visibility || undefined)
+    : prev?.visibility;
 
   // 年龄:值没变(或未提供)时必须连旧锚点一起带上,否则重放会把锚点错误刷新到本叶子时间(等于冻龄);
   // 用户真改了年龄才留空 ageTime,让重放盖上当前故事时间作新锚点。
   const age = patch.age !== undefined ? (patch.age.trim() || undefined) : prev?.age;
   const ageTime = age && age === prev?.age ? prev?.ageTime : undefined;
 
-  const fields = { gender, age, ageTime, relation, ties, title, desc, personality, outfit, condition, important, follow, location };
+  const next = { gender, age, relation, ties, title, desc, personality, outfit, condition, important, follow, location, visibility };
+  const autoLock = changedLockableFields(
+    prev as unknown as Record<string, unknown> | undefined,
+    next as unknown as Record<string, unknown>,
+    ['gender', 'age', 'relation', 'ties', 'title', 'desc', 'personality', 'outfit', 'condition', 'important', 'follow', 'location', 'visibility'],
+  );
+  const lock = [...new Set([...(patch.lock ?? []), ...autoLock])];
+  const fields = { gender, age, ageTime, relation, ties, title, desc, personality, outfit, condition, important, follow, location, aliases, visibility, lock, unlock: patch.unlock };
+
   if (norm(newName) !== norm(oldName)) {
     return appendOpToLatestLeaf({
-      npcs: { remove: [oldName], add: [{ name: newName, ...fields }] },
+      npcs: { remove: [oldName], add: [{ name: newName, ...fields, aliases: mergeRenameAliases(prev, newName) }] },
     });
   }
   return appendOpToLatestLeaf({ npcs: { update: [{ name: newName, ...fields }] } });
+}
+
+function mergeRenameAliases(prev: MemNpc | undefined, newName: string): string[] | undefined {
+  if (!prev) return undefined;
+  const extra = norm(prev.name) === norm(newName) ? [] : [prev.name];
+  const merged = [...extra, ...(prev.aliases ?? [])].filter(name => norm(name) !== norm(newName));
+  return merged.length ? merged : undefined;
+}
+
+/** 把 from 并入 into。写成一条叶子 merge op,重放后合成同一 id。 */
+export function mergeNpc(fromName: string, intoName: string): boolean {
+  const from = fromName.trim();
+  const into = intoName.trim();
+  if (!from || !into || norm(from) === norm(into)) return false;
+  return appendOpToLatestLeaf({ npcs: { merge: [{ from, into }] } });
 }
 
 /**
@@ -2030,14 +2049,14 @@ export function setNpcFollow(name: string, follow: boolean, location?: string): 
   const nm = name.trim();
   if (!nm) return false;
   const loc = follow ? undefined : (location?.trim() || undefined);
-  return appendOpToLatestLeaf({ npcs: { update: [{ name: nm, follow, location: loc }] } });
+  return appendOpToLatestLeaf({ npcs: { update: [{ name: nm, follow, location: loc, lock: follow ? ['follow'] : ['follow', 'location'] }] } });
 }
 
 /** 切换某 NPC 的「主要角色」标记(升/降重要性);与 setNpcFollow 同范式,写回最新叶子。 */
 export function setNpcImportant(name: string, important: boolean): boolean {
   const nm = name.trim();
   if (!nm) return false;
-  return appendOpToLatestLeaf({ npcs: { update: [{ name: nm, important }] } });
+  return appendOpToLatestLeaf({ npcs: { update: [{ name: nm, important, lock: ['important'] }] } });
 }
 
 /** 手动删除一个 NPC(退场)。 */
@@ -2200,7 +2219,7 @@ function rewriteFloorTags(chat: STMessage[], index: number, delta: StoredDelta):
  */
 export function editPlan(
   planIdStr: string,
-  patch: { content?: string; createdTime?: string; targetTime?: string },
+  patch: { content?: string; createdTime?: string; targetTime?: string; visibility?: KnowledgeScope | '' },
 ): boolean {
   const m = planIdStr.match(/^plan:(.+)#(\d+)$/);
   if (!m) return false;
@@ -2226,6 +2245,7 @@ export function editPlan(
   if (typeof patch.content === 'string') add.content = patch.content.trim();
   if (patch.createdTime !== undefined) add.createdTime = patch.createdTime.trim() || undefined;
   if (patch.targetTime !== undefined) add.targetTime = patch.targetTime.trim() || undefined;
+  if (patch.visibility !== undefined) add.visibility = patch.visibility || undefined;
 
   chat[index].extra = { ...(chat[index].extra ?? {}), bbs_leaf: leaf };
   recomputeDerived();

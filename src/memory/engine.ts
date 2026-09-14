@@ -7,8 +7,8 @@ import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@
 import { toast } from '@/st/toast';
 import { addSummary, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafBodyHash, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
 import { filterSummaryFeedIndices, summaryFeedNote } from './summaryFeed';
-import { extractJsonObject } from './json';
-import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
+import { extractJsonObjectLoose } from './json';
+import { clearInjection, clearLlmPickInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, selectRecentResolvedPlans, THINKING_CHECKLIST, THINKING_PREFILL } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { memory, recomputeDerived, scheduleLeafFlush } from './store';
@@ -1185,7 +1185,7 @@ async function summarizeFloorWork(
   options.onRequestStart?.();
   const delta = await sendAndParse(sender.send, messages, raw => {
     console.log('[柏宝书] 摘要原始返回(未清洗):\n', raw);
-    const d = extractJsonObject<SummaryDelta>(raw);
+    const d = extractJsonObjectLoose<SummaryDelta>(raw);
     const summary = llmString(d?.summary);
     if (!d || !summary) {
       throw new Error(raw.trim() ? '摘要失败:AI道歉或掉格式' : '摘要失败:AI空回');
@@ -1344,7 +1344,7 @@ async function summarizeBatchWork(
   // 解析 { floors: [...] };校验长度等于块楼数(缺楼/多楼都算失败,触发重试/回退)
   const list = await sendAndParse(sender.send, messages, raw => {
     console.log('[柏宝书] 批量摘要原始返回(未清洗):\n', raw);
-    const d = extractJsonObject<{ floors?: SummaryDelta[] }>(raw);
+    const d = extractJsonObjectLoose<{ floors?: SummaryDelta[] }>(raw);
     const floors = d?.floors;
     if (!Array.isArray(floors) || !floors.length) {
       throw new Error(raw.trim() ? '批量摘要失败:AI道歉或掉格式' : '批量摘要失败:AI空回');
@@ -1594,7 +1594,7 @@ export async function checkResummary(): Promise<number> {
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
       const delta = await sendAndParse(sender.send, messages, raw => {
         console.log('[柏宝书] 总结原始返回(未清洗):\n', raw);
-        const d = extractJsonObject<{ summary?: string }>(raw);
+        const d = extractJsonObjectLoose<{ summary?: string }>(raw);
         const summary = llmString(d?.summary);
         if (!summary) {
           // 输出层级 level+1:为 1 是普通总结,≥2 是二次总结;有文本=掉格式,空白=空回
@@ -1750,7 +1750,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     messages.push({ role: 'user', content: prompt });
     const delta = await sendAndParse(sender.send, messages, raw => {
       console.log('[柏宝书] 强制总结原始返回(未清洗):\n', raw);
-      const d = extractJsonObject<{ summary?: string }>(raw);
+      const d = extractJsonObjectLoose<{ summary?: string }>(raw);
       const summary = llmString(d?.summary);
       if (!summary) {
         const what = level === 1 ? '总结' : '二次总结';
@@ -1892,6 +1892,7 @@ export function bindEngine(): void {
     es.on(et.CHAT_CHANGED, () => {
       // 记忆重载由 store 的 CHAT_CHANGED 监听负责;此处仅在其后刷新注入
       clearRecallInjection(); // 切聊天先抹掉上个聊天的召回残留(新聊天下次生成再重算)
+      clearLlmPickInjection();
       setTimeout(() => {
         normalizeBacklogNotices(getContext()?.chat ?? []);
         refreshInjection();
@@ -1918,6 +1919,9 @@ export function bindEngine(): void {
   // 仅摘要模式切换后立即刷新持久化的 ST 提示槽;正文中的既有旁注不主动清理。
   watch(
     () => apiSettings.summaryOnlyMode,
-    () => refreshInjection(),
+    on => {
+      if (on) clearLlmPickInjection();
+      refreshInjection();
+    },
   );
 }

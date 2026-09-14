@@ -151,6 +151,9 @@ function fmtNpc(x: NpcDelta): { text: string; sub?: string } {
   if (x.location) parts.push(`位置:${x.location}`);
   if (x.follow === true) parts.push('随行');
   if (x.important === true) parts.push('主要角色');
+  if (x.aliases?.length) parts.push(`亦称${x.aliases.join('/')}`);
+  if (x.visibility === 'private') parts.push('私密');
+  if (x.visibility === 'observable') parts.push('可见');
   return { text, sub: parts.length ? parts.join(' · ') : undefined };
 }
 
@@ -170,12 +173,13 @@ const npcTags = computed<Tag[]>(() => {
   (np.add ?? []).forEach((x, i) => out.push({ key: `npc:add:${i}`, op: 'add', bucket: 'add', idx: i, ...fmtNpc(x), editable: true }));
   (np.update ?? []).forEach((x, i) => out.push({ key: `npc:update:${i}`, op: 'update', bucket: 'update', idx: i, ...fmtNpc(x), editable: true }));
   (np.remove ?? []).forEach((name, i) => out.push({ key: `npc:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: name, editable: true }));
+  (np.merge ?? []).forEach((x, i) => out.push({ key: `npc:merge:${i}`, op: 'update', bucket: 'merge', idx: i, text: `${x.from} → ${x.into}`, sub: '合并', editable: false }));
   return out;
 });
 const protagonistTags = computed<Tag[]>(() => {
   const protagonist = d.value?.protagonist;
   if (!protagonist) return [];
-  const labels: Record<keyof typeof protagonist, string> = {
+  const labels: Record<string, string> = {
     gender: '性别',
     age: '年龄',
     ageTime: '年龄锚点',
@@ -184,9 +188,9 @@ const protagonistTags = computed<Tag[]>(() => {
     outfit: '着装',
     condition: '状态',
   };
-  const parts = (Object.keys(labels) as Array<keyof typeof protagonist>)
-    .filter(key => protagonist[key] !== undefined)
-    .map(key => `${labels[key]}:${protagonist[key] || '(清空)'}`);
+  const parts = Object.keys(labels)
+    .filter(key => protagonist[key as keyof typeof protagonist] !== undefined)
+    .map(key => `${labels[key]}:${protagonist[key as keyof typeof protagonist] || '(清空)'}`);
   if (!parts.length) return [];
   return [{
     key: 'protagonist:update:0',

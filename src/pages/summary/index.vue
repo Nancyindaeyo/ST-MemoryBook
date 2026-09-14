@@ -8,7 +8,7 @@ import { batchBackfill, batchState, cancelBatchBackfill, engineState, floorBackf
 import { estimateInjectionTokenBreakdown, refreshInjection, selectViewNodes, type ViewNode } from '@/memory/inject';
 import { compactTimeLabel, formatRange, splitTimeLabel } from '@/memory/timeTag';
 import { relativeTimeLabel, weekdayLabel } from '@/memory/timeRel';
-import { derivedMeta, memory, recomputeDerived } from '@/memory/store';
+import { derivedMeta, memory, recomputeDerived, setRawPrequel } from '@/memory/store';
 import type { SceneFocus } from '@/memory/types';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
@@ -26,6 +26,7 @@ const resetViewStates = () => {
   searchQuery.value = '';
   searchOpen.value = false;
   closeImportHistory();
+  closePrequel();
   exitSelectMode();
 };
 let offChatChanged: (() => void) | null = null;
@@ -47,6 +48,7 @@ const isTouch = typeof window !== 'undefined' && window.matchMedia?.('(hover: no
  * 原先「悬念簿」把计划和悬念混在一栏;现拆成两个平级区,各自折叠、各自计数,
  * 语义更清晰(计划=角色的打算,悬念=未解的谜团),也和下方「摘要」并列成三区。 */
 const newKind = ref<'plan' | 'suspense'>('plan');
+const newVisibility = ref<'' | 'shared' | 'observable' | 'private'>('');
 const newContent = ref('');
 const newTargetTime = ref(''); // 手动添加计划时的可选目标时间(故事内时间)
 // 手动添加是低频操作:用弹窗承载,平时只露一个小「+」按钮,不占版面。
@@ -58,6 +60,7 @@ function openComposer(kind: 'plan' | 'suspense') {
   newKind.value = kind;
   newContent.value = '';
   newTargetTime.value = '';
+  newVisibility.value = '';
   composerOpen.value = true;
   // 仅在非触屏自动聚焦:移动端自动聚焦会立刻弹出输入法,挡住弹窗、体验差。
   if (!isTouch) void nextTick(() => contentInput.value?.focus());
@@ -141,7 +144,7 @@ function addPlan() {
   // 创建时间用当前已知故事时间(没有就留空);目标时间仅计划可填,用户填了才带上
   const createdTime = memory.state.time?.trim() || undefined;
   const targetTime = newKind.value === 'plan' ? newTargetTime.value.trim() || undefined : undefined;
-  if (!appendOpToLatestLeaf({ plans: { add: [{ kind: newKind.value, content, createdTime, targetTime }] } })) return;
+  if (!appendOpToLatestLeaf({ plans: { add: [{ kind: newKind.value, content, createdTime, targetTime, visibility: newVisibility.value || undefined }] } })) return;
   newContent.value = '';
   newTargetTime.value = '';
   composerOpen.value = false;
@@ -151,14 +154,15 @@ function removePlan(id: string) {
 }
 
 /* —— 编辑计划/悬念(弹窗)—— */
-const editingPlan = ref<{ id: string; kind: 'plan' | 'suspense'; content: string; createdTime: string; targetTime: string } | null>(null);
-function openPlanEdit(p: { id: string; kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string }) {
+const editingPlan = ref<{ id: string; kind: 'plan' | 'suspense'; content: string; createdTime: string; targetTime: string; visibility: '' | 'shared' | 'observable' | 'private' } | null>(null);
+function openPlanEdit(p: { id: string; kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: 'shared' | 'observable' | 'private' }) {
   editingPlan.value = {
     id: p.id,
     kind: p.kind,
     content: p.content,
     createdTime: p.createdTime ?? '',
     targetTime: p.targetTime ?? '',
+    visibility: p.visibility ?? '',
   };
 }
 function cancelPlanEdit() {
@@ -172,6 +176,7 @@ function savePlanEdit() {
     createdTime: e.createdTime,
     // 目标时间仅计划有意义;悬念保持空
     targetTime: e.kind === 'plan' ? e.targetTime : '',
+    visibility: e.visibility,
   });
   refreshInjection();
   editingPlan.value = null;
@@ -470,6 +475,30 @@ async function saveImportedHistory() {
   recomputeDerived();
   await syncHiddenNow(true);
   toast(`已导入旧总结,接管 #0 - #${floor}`, 'success');
+}
+
+/* ---- 前情原文:只粘贴进 chatMetadata,不进森林、不覆盖楼层 ---- */
+const prequelOpen = ref(false);
+const prequelText = ref('');
+
+function closePrequel() {
+  prequelOpen.value = false;
+}
+
+function openPrequel() {
+  prequelText.value = memory.rawPrequel?.text ?? '';
+  prequelOpen.value = true;
+}
+
+function savePrequel() {
+  setRawPrequel(prequelText.value);
+  closePrequel();
+  toast(memory.rawPrequel ? '已保存前情原文' : '已清空前情原文', 'success');
+}
+
+function clearPrequel() {
+  prequelText.value = '';
+  savePrequel();
 }
 
 const searching = computed(() => searchQuery.value.trim().length > 0);
@@ -922,6 +951,8 @@ provide(SUMMARY_CTX, {
             <div v-for="p in g.items" :key="p.id" class="bbs-plan">
               <div class="bbs-plan-head">
                 <span class="bbs-plan-kind" :class="p.kind">{{ p.kind === 'suspense' ? '悬念' : '计划' }}</span>
+                <span v-if="p.visibility === 'private'" class="bbs-plan-vis is-private">私密</span>
+                <span v-else-if="p.visibility === 'observable'" class="bbs-plan-vis">可见</span>
                 <span v-if="planFloor(p.id) !== undefined" class="bbs-plan-floor">#{{ planFloor(p.id) }}</span>
                 <span class="bbs-plan-acts">
                   <button class="bbs-plan-act" type="button" title="编辑" @click="openPlanEdit(p)"><Icon name="edit" /></button>
@@ -1002,6 +1033,16 @@ provide(SUMMARY_CTX, {
         </button>
         <button
           v-if="!selectMode"
+          class="bbs-btn bbs-btn-sm"
+          type="button"
+          title="粘贴旧剧情长文供召回抽段,不进摘要森林、不覆盖楼层"
+          @click="openPrequel"
+        >
+          <Icon name="summary" />
+          <span class="bbs-btn-label">前情原文</span>
+        </button>
+        <button
+          v-if="!selectMode"
           class="bbs-btn bbs-btn-sm bbs-resummary-btn"
           type="button"
           :disabled="resummaryRunning || engineState.running"
@@ -1015,6 +1056,7 @@ provide(SUMMARY_CTX, {
       </div>
     </div>
     <p v-if="resummaryHint" class="bbs-resummary-hint">{{ resummaryHint }}</p>
+    <p v-if="memory.rawPrequel?.text" class="bbs-resummary-hint">已存前情原文 {{ memory.rawPrequel.text.length }} 字,生成时按相关抽段,不改已有摘要。</p>
 
     <!-- 搜索框:点工具行放大镜才展开(选择模式下不显示,两态互斥)。搜全森林(含已压缩的深层节点) -->
     <div v-if="!selectMode && searchOpen && rootNodes.length" class="bbs-search">
@@ -1301,6 +1343,33 @@ provide(SUMMARY_CTX, {
       </div>
     </ModalMask>
 
+    <!-- ===== 前情原文弹窗 ===== -->
+    <ModalMask :open="prequelOpen" @close="closePrequel">
+      <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="前情原文">
+        <header class="bbs-modal-head">
+          <span class="bbs-modal-title">前情原文</span>
+          <button class="bbs-summary-act" type="button" title="关闭" @click="closePrequel"><Icon name="close" /></button>
+        </header>
+        <p class="bbs-field-hint bbs-import-note">
+          粘贴还没被柏宝书摘要过的旧剧情长文。只作召回素材,不会变成森林节点,也不会隐藏或覆盖任何楼层。与「导入旧总结」不是同一件事。
+        </p>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">前情正文</span>
+          <textarea
+            v-model="prequelText"
+            class="bbs-input bbs-modal-textarea"
+            rows="12"
+            placeholder="按时间顺序粘贴旧剧情…"
+          ></textarea>
+        </label>
+        <footer class="bbs-modal-foot">
+          <button class="bbs-btn" type="button" @click="closePrequel">取消</button>
+          <button class="bbs-btn" type="button" :disabled="!prequelText.trim() && !memory.rawPrequel" @click="clearPrequel">清空</button>
+          <button class="bbs-btn bbs-btn-primary" type="button" @click="savePrequel">保存</button>
+        </footer>
+      </div>
+    </ModalMask>
+
     <!-- ===== 添加计划 / 悬念弹窗 ===== -->
     <ModalMask :open="composerOpen" @close="closeComposer">
       <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="添加计划或悬念">
@@ -1327,6 +1396,14 @@ provide(SUMMARY_CTX, {
           ></textarea>
         </label>
         <!-- 目标时间仅「计划」可填,可选;悬念一般无目标时间故不显示 -->
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">知情边界</span>
+          <select v-model="newVisibility" class="bbs-input">
+            <option value="">已知(默认)</option>
+            <option value="observable">在场可见</option>
+            <option value="private">私密</option>
+          </select>
+        </label>
         <label v-if="newKind === 'plan'" class="bbs-modal-field">
           <span class="bbs-modal-label">目标时间(可选)</span>
           <input
@@ -1357,6 +1434,14 @@ provide(SUMMARY_CTX, {
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">创建时间(可选)</span>
           <input v-model="editingPlan.createdTime" class="bbs-input" type="text" placeholder="故事内时间,如 1988/9/29" />
+        </label>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">知情边界</span>
+          <select v-model="editingPlan.visibility" class="bbs-input">
+            <option value="">已知(默认)</option>
+            <option value="observable">在场可见</option>
+            <option value="private">私密</option>
+          </select>
         </label>
         <label v-if="editingPlan.kind === 'plan'" class="bbs-modal-field">
           <span class="bbs-modal-label">目标时间(可选)</span>
@@ -1552,6 +1637,17 @@ provide(SUMMARY_CTX, {
   gap: 8px;
 }
 /* 类型标签:小药丸,用颜色区分计划/悬念 */
+.bbs-plan-vis {
+  font-size: 11px;
+  color: var(--bbs-ink-muted);
+  padding: 1px 6px;
+  border-radius: var(--bbs-radius-pill);
+  border: 1px solid var(--bbs-line);
+}
+.bbs-plan-vis.is-private {
+  color: var(--bbs-warning);
+  border-color: var(--bbs-warning);
+}
 .bbs-plan-kind {
   flex: 0 0 auto;
   font-size: 11px;

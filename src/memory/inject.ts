@@ -15,6 +15,8 @@ import type { STMessage } from '@/st/context';
 import { getContext } from '@/st/context';
 import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid } from './apply';
 import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
+import { budgetTiersToTry, filterItemsForBudget, filterNpcsForBudget, normalizeBudgetTokens, type InjectBudgetTier } from './injectBudget';
+import { npcNameList, visibilityInjectTag } from './npcIdentity';
 import { fmtNpcTiesContext } from './npcRelations';
 import { memory } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
@@ -39,6 +41,8 @@ const HISTORY_INJECT_KEY = 'baibai_book_memory_history';
 const STATE_INJECT_KEY = 'baibai_book_memory_state';
 /** 时间标签固定提示词槽:注入主对话,要求每条正文前后输出 <bbs_start>/<bbs_end> */
 const TIMETAG_INJECT_KEY = 'baibai_book_time_tag';
+/** LLM 选材 / 前情原文抽段,与向量召回并列的独立槽 */
+const LLM_PICK_INJECT_KEY = 'baibai_book_llm_pick';
 /** 历史摘要尽量放到聊天上下文顶部;当前状态贴近最近对话 */
 const HISTORY_INJECT_DEPTH = 9999;
 const STATE_INJECT_DEPTH_AFTER_LATEST_AI = 1;
@@ -314,7 +318,7 @@ function sceneChain(scenes: MemScene[], node: MemScene | null): MemScene[] {
  *  - 其他去过的地点:仅列名称(完整路径名),帮 AI 复用既有命名、避免重复记录。
  * 无场景数据返回空串。
  */
-function fmtSceneContext(scenes: MemScene[], here: string, locationPath?: string[]): string {
+function fmtSceneContext(scenes: MemScene[], here: string, locationPath?: string[], includeOthers = true): string {
   if (!scenes.length) return '';
   const current = findCurrentScene(scenes, here, locationPath);
   const chain = sceneChain(scenes, current);
@@ -327,12 +331,14 @@ function fmtSceneContext(scenes: MemScene[], here: string, locationPath?: string
       .join(' › ');
     lines.push(`当前所在(由大到小):${detailed}`);
   }
-  // 其他地点:仅名称(用完整路径表达层级),排除已在祖先链里详述的
-  const others = scenes
-    .filter(s => !chainIds.has(s.id))
-    .map(s => s.path.join(' › '));
-  if (others.length) {
-    lines.push(`其他已知地点(仅名称,勿重复记录):\n${others.map(o => `  - ${o}`).join('\n')}`);
+  // 其他地点:仅名称(用完整路径表达层级),排除已在祖先链里详述的。预算紧张时丢掉。
+  if (includeOthers) {
+    const others = scenes
+      .filter(s => !chainIds.has(s.id))
+      .map(s => s.path.join(' › '));
+    if (others.length) {
+      lines.push(`其他已知地点(仅名称,勿重复记录):\n${others.map(o => `  - ${o}`).join('\n')}`);
+    }
   }
   return lines.join('\n');
 }
@@ -414,6 +420,14 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
     else absent.push(n);
   }
   const age = (n: MemNpc): string => oneLine(ageDisplay(n.age, n.ageTime, now));
+  const vis = (n: MemNpc): string => {
+    const tag = visibilityInjectTag(n.visibility);
+    return tag ? `${tag} ` : '';
+  };
+  const alias = (n: MemNpc): string => {
+    const extra = npcNameList(n).filter(name => name !== n.name);
+    return extra.length ? `(亦称${extra.join('、')})` : '';
+  };
 
   const lines: string[] = [];
   const ties = fmtNpcTiesContext(npcs);
@@ -423,9 +437,9 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
     const detailed = main
       .map(n => {
         const inBracket = [oneLine(n.gender), age(n), oneLine(n.title)].filter(Boolean);
-        const head = inBracket.length ? `${n.name}(${inBracket.join('·')})` : n.name;
+        const head = inBracket.length ? `${n.name}${alias(n)}(${inBracket.join('·')})` : `${n.name}${alias(n)}`;
         const rel = oneLine(n.relation) ? ` —— 与主角:${oneLine(n.relation)}` : '';
-        return `  - ${head}${rel}${npcStateTail(n, true)}`;
+        return `  - ${vis(n)}${head}${rel}${npcStateTail(n, true)}`;
       })
       .join('\n');
     lines.push(`主要角色(核心主演,需始终保持其当前状态连贯):\n${detailed}`);
@@ -433,7 +447,7 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
   if (present.length) {
     const detailed = present
       .map(n => {
-        const parts = [n.name];
+        const parts = [`${n.name}${alias(n)}`];
         const inBracket = [oneLine(n.gender), age(n), oneLine(n.title)].filter(Boolean);
         if (inBracket.length) parts.push(`(${inBracket.join('·')})`);
         const profile: string[] = [];
@@ -442,7 +456,7 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
         if (oneLine(n.desc)) profile.push(oneLine(n.desc));
         const profileStr = profile.length ? ` —— ${profile.join(';')}` : '';
         const place = n.follow ? ' [随行]' : '';
-        return `  - ${parts.join('')}${place}${profileStr}${npcStateTail(n, false)}`;
+        return `  - ${vis(n)}${parts.join('')}${place}${profileStr}${npcStateTail(n, false)}`;
       })
       .join('\n');
     lines.push(`在场角色:\n${detailed}`);
@@ -458,7 +472,7 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
         if (oneLine(n.personality)) profile.push(`性格:${oneLine(n.personality)}`);
         const pers = profile.length ? ` —— ${profile.join(';')}` : '';
         const place = oneLine(n.location) ? ` [在:${oneLine(n.location)}]` : '';
-        return `  - ${n.name}${bracket}${pers}${place}`;
+        return `  - ${vis(n)}${n.name}${alias(n)}${bracket}${pers}${place}`;
       })
       .join('\n');
     lines.push(`同区域角色(在附近但未必照面;需要时可让其自然登场,勿凭空改设定):\n${brief}`);
@@ -470,7 +484,7 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
         const inBracket = [oneLine(n.gender), relationHead(n.relation), oneLine(n.title)].filter(Boolean);
         const bracket = inBracket.length ? `(${inBracket.join('·')})` : '';
         const loc = oneLine(n.location);
-        return `  - ${n.name}${bracket}${loc ? ` [在:${loc}]` : ''}`;
+        return `  - ${vis(n)}${n.name}${bracket}${loc ? ` [在:${loc}]` : ''}`;
       })
       .join('\n');
     lines.push(`其他已知角色(不在当前场景,仅名与身份):\n${brief}`);
@@ -539,20 +553,32 @@ export function buildStateInjectionText(): string {
   // 注入设置(设置页「注入设置」区):只影响这里发给主模型的内容;
   // 副 API 摘要走 prompts.ts 自己的状态渲染,始终见全量、照常记录,不受这些开关影响。
   // 依赖:NPC 在场分档 / 物品可达判定都走场景树 → 场景不注入时 NPC/物品随之不注入。
+  const mention = recentContextText();
+  const budget = normalizeBudgetTokens(apiSettings.injection.budgetTokens);
+  let text = '';
+  for (const level of budgetTiersToTry(budget)) {
+    text = assembleStateInjection(level, mention);
+    if (!text || budget <= 0 || estimateTextTokens([text]) <= budget) break;
+  }
+  return text;
+}
+
+function assembleStateInjection(level: InjectBudgetTier, mention: string): string {
   const inj = apiSettings.injection;
   const scenesOn = inj.scenes;
   const npcsOn = inj.npcs && scenesOn;
   const itemsOn = inj.items && scenesOn;
+  const tight = level !== 'full';
+  const core = level === 'core';
 
   const st: string[] = [];
+  if (tight) st.push('(状态已按预算裁剪:优先保留在场、随身与本轮提及)');
   if (memory.state.time) {
-    // 周几只在标准公历带年份时有(weekdayLabel 自带门槛),古风/架空时间不标
     const wd = weekdayLabel(memory.state.time);
     st.push(`当前时间:${memory.state.time}${wd ? ` (${wd})` : ''}`);
   }
   if (memory.state.location) st.push(`当前地点:${oneLine(memory.state.location)}`);
 
-  // 互动局势卡:衔接当下场面。tension/将发生仅作隐性氛围约束,明确告知勿点破——防过度提及。
   const focus = memory.state.sceneFocus;
   if (inj.sceneFocus && focus) {
     const bits: string[] = [`局面:${oneLine(focus.situation)}`];
@@ -564,17 +590,14 @@ export function buildStateInjectionText(): string {
     st.push(`[当前互动局势]\n${bits.join('\n')}`);
   }
 
-  // 生活小档案:置顶常驻 + 关键词触发的时效/沉降层。「记住 ≠ 每回合必提」——没命中就不出现。
-  // 记录始终开启(无开关);这里 injection.lifeDetails 只管「注入」。
-  if (inj.lifeDetails && memory.lifeDetails.length) {
-    const picked = selectLifeDetailsForInjection(memory.lifeDetails, recentContextText(), memory.state.time, calculateRelativeDays);
+  if (inj.lifeDetails && memory.lifeDetails.length && !core) {
+    const picked = selectLifeDetailsForInjection(memory.lifeDetails, mention, memory.state.time, calculateRelativeDays);
     if (picked.length) {
       const lines = picked.map(d => `- ${oneLine(d.text)}`);
       st.push(`[主角生活细节]\n${lines.join('\n')}\n(以上仅在与当前对话自然相关时参考;不要逐条复述、不要刻意提及,用不上就忽略)`);
     }
   }
 
-  // 主角状态自包含,不依赖场景树,独立开关。
   if (inj.protagonist) {
     const protagonistBlock = fmtProtagonistContext(memory.protagonist, getContext()?.name1 ?? '', memory.state.time);
     if (protagonistBlock) st.push(`[主角当前状态]\n${protagonistBlock}`);
@@ -582,54 +605,56 @@ export function buildStateInjectionText(): string {
 
   const here = memory.state.location || '';
   const locPath = memory.state.locationPath;
-  // 场景树:当前地点 + 祖先链(详细) + 其他地点(仅名称)。祖先链同时用于物品/NPC 可达判定。
   if (scenesOn) {
-    const sceneBlock = fmtSceneContext(memory.scenes, here, locPath);
+    const sceneBlock = fmtSceneContext(memory.scenes, here, locPath, !tight);
     if (sceneBlock) st.push(`地点记忆:\n${sceneBlock}`);
   }
 
-  // 物品分两组省 token:可达(随身 / 存放地落在当前地点或其祖先链)发全量(名+量+描述);
-  // 他处寄存的只发名+数量(砍掉描述这个大头),既省 token 又不至于让主模型以为东西没了。
-  if (itemsOn) st.push(...fmtItemContext(memory.items, memory.scenes, here, locPath));
-  // 注:近期物品变动不在此注入。改为摘要后写进对应楼层正文 </bbs_end> 之后(见 engine.ts),
-  // 窗口内全文楼层天然可见、滚出窗口自然消失 —— 符合「物品变动只在那段时间有用」的取舍。
+  if (itemsOn) {
+    const current = findCurrentScene(memory.scenes, here, locPath);
+    const sceneIndex = buildSceneLocationIndex(memory.scenes);
+    const items = filterItemsForBudget(memory.items, {
+      tier: level,
+      mentionText: mention,
+      reachable: item => itemReachableAtScene(memory.scenes, item.location, current, here, sceneIndex),
+    });
+    st.push(...fmtItemContext(items, memory.scenes, here, locPath));
+  }
 
-  // NPC 名册四档:在场发全量;同区域发名+身份+性格+所在地;不在场只发名+身份。NPC 越多省得越多。
   if (npcsOn) {
-    const npcBlock = fmtNpcContext(memory.npcs, memory.scenes, here, locPath, memory.state.time);
+    const npcs = filterNpcsForBudget(memory.npcs, {
+      tier: level,
+      mentionText: mention,
+      presenceOf: n => classifyNpcPresence(n, memory.scenes, here, locPath),
+    });
+    const npcBlock = fmtNpcContext(npcs, memory.scenes, here, locPath, memory.state.time);
     if (npcBlock) st.push(`NPC名册:\n${npcBlock}`);
   }
 
   const openPlans = memory.plans
     .filter(p => p.status === 'open')
-    .map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime }));
+    .map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime, visibility: p.visibility }));
   st.push(`未了结的计划/悬念:\n${fmtPlans(openPlans)}`);
 
-  // 近期已完成的计划/悬念:防 AI 把刚了结的当未完成又去推进。与副API摘要同口径,只差截止点
-  // (这里用全量 memory.plans;副API用 deriveMemory(chat, beforeIndex).plans)。
-  const recentResolved = selectRecentResolvedPlans(memory.plans, apiSettings.recentResolvedPlansCount);
-  if (recentResolved.length) st.push(`近期已了结(已结案,含了结方式/原因;勿当未完成再推进/重复记录):\n${fmtResolvedPlans(recentResolved)}`);
+  if (!tight) {
+    const recentResolved = selectRecentResolvedPlans(memory.plans, apiSettings.recentResolvedPlansCount);
+    if (recentResolved.length) st.push(`近期已了结(已结案,含了结方式/原因;勿当未完成再推进/重复记录):\n${fmtResolvedPlans(recentResolved)}`);
+  }
 
-  // 自定义变量:发当前状态 + 各字段「含义」给主模型(帮它理解并保持数值/设定连贯),明确框定为只读。
-  // ⚠️ 绝不注入「变化规则」(rule)——那是给副API摘要用的「如何增删改」指令(含 set/assign 命令语法);
-  //    主模型看到「何时怎么变」会误以为该在正文里输出/复述变量或命令。含义只描述「是什么」,给主模型安全。
   const varMeaning = (['global', 'char', 'chat'] as const)
     .map(t => memory.varTemplates[t].meaning.trim())
     .filter(Boolean)
     .join('\n\n');
   const hasVarState = Object.keys(memory.vars).length > 0;
-  if (hasVarState) {
+  if (hasVarState && !core) {
     let block = `自定义变量(当前状态,只读参考——严禁在正文里复述、罗列或输出这些变量/命令):\n${renderVarsState(memory.vars)}`;
-    if (varMeaning) block += `\n变量含义(仅帮你理解上面的值,不要输出):\n${varMeaning}`;
+    if (varMeaning && !tight) block += `\n变量含义(仅帮你理解上面的值,不要输出):\n${varMeaning}`;
     st.push(block);
   }
 
-  // 状态块在有任何有意义内容时才注入(物品/计划即使空也会有「(无)」占位,
-  // 但只要存在摘要或时间/地点就值得带上整块)
-  const hasProtagonist = inj.protagonist && Object.values(memory.protagonist).some(value => !!oneLine(value));
+  const hasProtagonist = inj.protagonist && Object.values(memory.protagonist).some(value => typeof value === 'string' && !!oneLine(value));
   const hasState = memory.state.time || memory.state.location || (inj.sceneFocus && memory.state.sceneFocus) || hasProtagonist || (itemsOn && memory.items.length) || (scenesOn && memory.scenes.length) || (npcsOn && memory.npcs.length) || openPlans.length || hasVarState || (inj.lifeDetails && memory.lifeDetails.length);
   if (!hasState) return '';
-  // 首尾私密简报框定,避免主模型把状态快照当成要复述/输出的模板(正文后跟吐一份状态)
   return `${MEMORY_BRIEFING_NOTE}\n[当前状态]\n${st.join('\n')}\n${MEMORY_BRIEFING_END}`;
 }
 
@@ -691,4 +716,15 @@ export function clearInjection(): void {
   ctx?.setExtensionPrompt?.(HISTORY_INJECT_KEY, '', IN_CHAT, HISTORY_INJECT_DEPTH, false, ROLE_SYSTEM, null);
   ctx?.setExtensionPrompt?.(STATE_INJECT_KEY, '', IN_CHAT, stateDepth, false, ROLE_SYSTEM, null);
   ctx?.setExtensionPrompt?.(TIMETAG_INJECT_KEY, '', IN_CHAT, TIMETAG_INJECT_DEPTH, false, ROLE_SYSTEM, null);
+  clearLlmPickInjection();
+}
+
+/** 写入选材召回槽。空串等于清除。深度与向量召回同一套,由调用方传入。 */
+export function writeLlmPickInjection(text: string, depth: number): void {
+  const d = Number.isFinite(depth) && depth >= 0 ? Math.floor(depth) : 0;
+  getContext()?.setExtensionPrompt?.(LLM_PICK_INJECT_KEY, text, IN_CHAT, d, false, ROLE_SYSTEM, null);
+}
+
+export function clearLlmPickInjection(): void {
+  writeLlmPickInjection('', 0);
 }

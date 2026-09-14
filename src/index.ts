@@ -1,5 +1,6 @@
 import { hydrateSettings } from '@/api/settings';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
+import { runSupplementalRecall } from '@/memory/llmPick';
 import { runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
 import { refreshInjection } from '@/memory/inject';
 import { syncTimeTagRegex } from '@/memory/timeTag';
@@ -37,10 +38,11 @@ const HOST_ID = 'bbs-app-host';
   try {
     // 先走积压拦截:返回 true = 已 abort 本次生成,无需召回(生成不会发生)。
     const intercepted = await handleGenerationIntercept(type, abort);
-    // 放行且该类型需要召回 → 阻塞式向量召回(写注入槽后再放行生成)。
-    // 召回内部自带向量开关/可用性判断,失败静默降级,绝不影响生成。
+    // 放行且该类型需要召回 → 先向量、再选材/前情抽段(写注入槽后再放行生成)。
+    // 两路失败都只清各自的槽,绝不影响生成。
     if (!intercepted && shouldRecallForType(type)) {
       await runVectorRecall();
+      await runSupplementalRecall();
     }
   } catch (e) {
     console.error('[柏宝书] 生成拦截器异常(放行本次生成)', e);

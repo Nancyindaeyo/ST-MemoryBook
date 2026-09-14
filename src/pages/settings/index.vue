@@ -1044,6 +1044,28 @@ function exportPublicApiDocument() {
           <input v-model="apiSettings.injection.items" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
         </label>
         <p class="bbs-field-hint">随身/可达物品发全量,他处寄存仅名与数量;依赖场景信息。</p>
+
+        <label class="bbs-num-row">
+          <span class="bbs-field-label">状态注入预算</span>
+          <input v-model.number="apiSettings.injection.budgetTokens" class="bbs-input bbs-num" type="number" min="0" max="20000" step="100" :disabled="apiSettings.summaryOnlyMode" />
+        </label>
+        <p class="bbs-field-hint">约 token 数。0=不裁剪。超限时先丢掉不在场角色、他处寄存物品和变量说明,再只留在场/随身/本轮提及。森林压缩史不裁。手机或窗口紧时建议 1500–2500。</p>
+
+        <label class="bbs-switch-row">
+          <span class="bbs-field-label">LLM 选材召回</span>
+          <input v-model="apiSettings.llmPick.enabled" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode" />
+        </label>
+        <p class="bbs-field-hint">生成前用摘要副 API 从窗口外叶子和前情原文里选题,与向量召回并列。失败只清空选材槽,不挡住正文生成。每轮多一次副 API 请求,默认关。</p>
+
+        <label class="bbs-num-row">
+          <span class="bbs-field-label">最多选几条叶子</span>
+          <input v-model.number="apiSettings.llmPick.maxLeaves" class="bbs-input bbs-num" type="number" min="1" max="12" step="1" :disabled="apiSettings.summaryOnlyMode || !apiSettings.llmPick.enabled" />
+        </label>
+        <label class="bbs-num-row">
+          <span class="bbs-field-label">最多抽几段前情</span>
+          <input v-model.number="apiSettings.llmPick.maxPrequelChunks" class="bbs-input bbs-num" type="number" min="1" max="8" step="1" :disabled="apiSettings.summaryOnlyMode" />
+        </label>
+        <p class="bbs-field-hint">未开 LLM 选材时,前情原文仍按本轮提及关键词抽段注入。粘贴入口在摘要页「前情原文」。</p>
       </Collapsible>
 
       <!-- 排除角色 -->

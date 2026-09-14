@@ -54,6 +54,9 @@ export interface NpcSummaryView {
   condition?: string;
   follow?: boolean;
   location?: string;
+  aliases?: string[];
+  visibility?: 'private' | 'shared' | 'observable';
+  lockedFields?: string[];
 }
 
 /** 给摘要模型的已登场 NPC 名册。长期关系必须随既有状态一起给模型，才能做整体覆盖更新。 */
@@ -76,7 +79,11 @@ export function fmtNpcSummaryList(npcs: NpcSummaryView[]): string {
       if (oneLine(n.outfit)) state.push(`着装:${oneLine(n.outfit)}`);
       if (oneLine(n.condition)) state.push(`状态:${oneLine(n.condition)}`);
       const stateStr = state.length ? ` 〔${state.join(';')}〕` : '';
-      return `  - ${star}${oneLine(n.name)}${bracket}${place}${title}${stateStr}`;
+      const aliases = (n.aliases ?? []).map(oneLine).filter(Boolean);
+      const aka = aliases.length ? `(亦称${aliases.join('、')})` : '';
+      const vis = n.visibility === 'private' ? ' [私密]' : n.visibility === 'observable' ? ' [可见]' : '';
+      const locked = n.lockedFields?.length ? ` [已锁:${n.lockedFields.join('/')}]` : '';
+      return `  - ${star}${oneLine(n.name)}${aka}${bracket}${place}${title}${stateStr}${vis}${locked}`;
     })
     .join('\n');
 }

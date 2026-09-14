@@ -181,6 +181,20 @@ export interface InjectionSections {
   items: boolean;
   /** 场景信息(当前地点+祖先链+其他已知地点);关闭后 NPC/物品随之不注入 */
   scenes: boolean;
+  /**
+   * 状态注入预算(约 token 数)。0=不裁剪。
+   * 超出时按 tight→core 丢掉不在场/他处寄存/未提及的块;森林压缩史不裁。
+   */
+  budgetTokens: number;
+}
+
+/** 生成前用摘要副 API 从窗口外叶子 + 前情原文选题。默认关(每轮多一次请求)。 */
+export interface LlmPickSettings {
+  enabled: boolean;
+  /** 最多注入几条窗口外叶子 */
+  maxLeaves: number;
+  /** 最多注入几段前情原文 */
+  maxPrequelChunks: number;
 }
 
 export interface ApiSettings {
@@ -211,6 +225,8 @@ export interface ApiSettings {
   summarizeAiOnly: boolean;
   /** 注入设置:各状态块是否注入主模型(仅摘要模式开启时整组不生效) */
   injection: InjectionSections;
+  /** LLM 选材召回。与向量并列;失败只清槽,不挡生成。 */
+  llmPick: LlmPickSettings;
   /** 保留最近 N 条 AI 消息发全文(滑动窗口);更早的自动摘要并隐藏 */
   keepRecent: number;
   /** 排除的角色名:这些名字(含重名卡)的聊天里,记忆系统所有功能都不生效 */
@@ -354,7 +370,8 @@ function defaults(): ApiSettings {
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
     summarizeAiOnly: false,
-    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, items: true, scenes: true },
+    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, items: true, scenes: true, budgetTokens: 0 },
+    llmPick: { enabled: false, maxLeaves: 4, maxPrequelChunks: 3 },
     keepRecent: 3,
     excludedChars: [],
     excludedWorldNames: [],
@@ -433,6 +450,19 @@ function normalize(raw: unknown): ApiSettings {
     npcs: typeof ri.npcs === 'boolean' ? ri.npcs : true,
     items: typeof ri.items === 'boolean' ? ri.items : true,
     scenes: typeof ri.scenes === 'boolean' ? ri.scenes : true,
+    budgetTokens: Number.isFinite(ri.budgetTokens) && (ri.budgetTokens as number) >= 0
+      ? Math.min(Math.floor(ri.budgetTokens as number), 20000)
+      : 0,
+  };
+  const rp = ((raw as Partial<ApiSettings>).llmPick ?? {}) as Partial<LlmPickSettings>;
+  merged.llmPick = {
+    enabled: typeof rp.enabled === 'boolean' ? rp.enabled : false,
+    maxLeaves: Number.isFinite(rp.maxLeaves) && (rp.maxLeaves as number) >= 1
+      ? Math.min(Math.floor(rp.maxLeaves as number), 12)
+      : 4,
+    maxPrequelChunks: Number.isFinite(rp.maxPrequelChunks) && (rp.maxPrequelChunks as number) >= 1
+      ? Math.min(Math.floor(rp.maxPrequelChunks as number), 8)
+      : 3,
   };
   // vector 同为嵌套对象(且内含子对象),逐层兜底,老数据缺字段时回退默认。
   // 注:旧结构曾有 vector.channels + {channel,model};扁平化后弃用,逐角色按 url/key/model 兜底,

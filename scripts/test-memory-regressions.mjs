@@ -323,6 +323,130 @@ deepEqual(filterSummaryFeedIndices(feedChat, [0, 1, 2], true), [1], '只总结 A
 equal(summaryFeedNote(true).includes('只含 AI 输出'), true, '只总结 AI 输出时应给模型说明');
 equal(summaryFeedNote(false), '', '默认不应附加摘要正文说明');
 
+includes(applySource, 'applyNpcBook(mem.npcs, d.npcs', 'NPC 重放必须走别名/锁/合并的 applyNpcBook');
+includes(applySource, 'stripManualNpcLocks', '摘要固化必须剥掉人工锁字段');
+
+const {
+  applyNpcBook,
+  findNpc,
+  npcMentioned,
+} = await importStandalone('../src/memory/npcIdentity.ts');
+const { applyLockPatch, changedLockableFields } = await importStandalone('../src/memory/fieldLock.ts');
+const { filterNpcsForBudget, filterItemsForBudget, normalizeBudgetTokens } = await importStandalone('../src/memory/injectBudget.ts');
+
+const book = [];
+applyNpcBook(book, {
+  add: [
+    { name: '小红', title: '药铺学徒', desc: '红衣' },
+    { name: '红红', title: '另一人' },
+  ],
+}, { t: 1, storyTime: '1988/1/1' });
+equal(book.length, 2, '不同名字应先建成两人');
+applyNpcBook(book, { merge: [{ from: '红红', into: '小红' }] }, { t: 2, storyTime: '1988/1/2' });
+equal(book.length, 1, '合并后应只剩一人');
+equal(book[0].name, '小红', '合并后保留 into 的名字');
+deepEqual(book[0].aliases, ['红红'], '被合并的名字应变成别名');
+applyNpcBook(book, { add: [{ name: '红红', title: '应复用', desc: '蓝衣' }] }, { t: 3, storyTime: '1988/1/3' });
+equal(book.length, 1, '别名再 add 不得裂成第二人');
+equal(book[0].title, '药铺学徒', '重复 add 不得覆盖已有身份');
+equal(book[0].desc, '红衣', '重复 add 不得覆盖已有外貌');
+
+applyNpcBook(book, { update: [{ name: '小红', desc: '用户定稿', lock: ['desc'] }] }, { t: 4, storyTime: '1988/1/4' });
+equal(book[0].desc, '用户定稿', '上锁当次应写入新外貌');
+applyNpcBook(book, { update: [{ name: '红红', desc: '模型想改回去' }] }, { t: 5, storyTime: '1988/1/5' });
+equal(book[0].desc, '用户定稿', '已锁外貌不应被后续摘要改掉');
+equal(findNpc(book, '红红')?.name, '小红', '按别名应找到同一人');
+
+const locked = applyLockPatch(['desc'], { lock: ['relation'], unlock: ['desc'] });
+deepEqual(locked, ['relation'], '锁补丁应按 lock/unlock 叠加');
+deepEqual(
+  changedLockableFields({ desc: '红衣' }, { desc: '蓝衣', title: '药铺学徒' }, ['desc', 'title']),
+  ['desc', 'title'],
+  '用户改过的字段应自动进入待锁列表',
+);
+
+const npcs = [
+  { id: 'npc:a', name: '阿黛尔', important: true },
+  { id: 'npc:b', name: '店小二', aliases: ['小二'] },
+  { id: 'npc:c', name: '镇长' },
+];
+const presenceOf = n => (n.name === '店小二' ? 'present' : n.name === '镇长' ? 'absent' : 'absent');
+equal(filterNpcsForBudget(npcs, { tier: 'full', mentionText: '', presenceOf }).length, 3, 'full 档保留全员');
+deepEqual(
+  filterNpcsForBudget(npcs, { tier: 'core', mentionText: '小二来了', presenceOf }).map(n => n.name),
+  ['阿黛尔', '店小二'],
+  'core 档只留主要角色、在场和本轮提及',
+);
+deepEqual(
+  filterItemsForBudget(
+    [
+      { id: 'item:剑', name: '剑', carried: true },
+      { id: 'item:箱', name: '木箱', carried: false, location: '库房' },
+    ],
+    { tier: 'core', mentionText: '', reachable: () => false },
+  ).map(i => i.name),
+  ['剑'],
+  'core 档丢掉他处寄存物品',
+);
+equal(normalizeBudgetTokens(-1), 0, '非法预算回退为不裁剪');
+equal(npcMentioned({ name: '小红', aliases: ['红红'] }, '红红推门进来'), true, '别名应能命中本轮提及');
+
+const {
+  extractJsonObject,
+  extractJsonObjectLoose,
+} = await importStandalone('../src/memory/json.ts');
+const brokenNpcJson = `{
+  "summary": "他走进药铺",
+  "npcs": oops,
+  "time": "第三天"
+}`;
+equal(extractJsonObject(brokenNpcJson), null, '严格解析应对坏字段整段失败');
+const salvaged = extractJsonObjectLoose(brokenNpcJson);
+equal(salvaged?.summary, '他走进药铺', '宽松解析应保住 summary');
+equal(salvaged?.time, '第三天', '宽松解析应保住 time');
+equal(salvaged?.npcs, undefined, '坏字段应被丢掉而不是连坐');
+equal(
+  extractJsonObjectLoose('说明文字 {"summary":"合法"} 尾巴')?.summary,
+  '合法',
+  '宽松解析仍应走围栏外截取',
+);
+
+const {
+  splitPrequelChunks,
+  pickPrequelByKeywords,
+  parseOneBasedIndexes,
+  buildLeafCatalog,
+} = await importStandalone('../src/memory/prequel.ts');
+deepEqual(
+  splitPrequelChunks('第一段讲药铺。\n\n第二段小红推门。\n\n第三段无关天气。').length,
+  3,
+  '空行应切出三段前情',
+);
+deepEqual(
+  pickPrequelByKeywords(
+    ['第一段讲药铺。', '第二段小红推门。', '第三段无关天气。'],
+    '小红推门进来买药',
+    2,
+  ),
+  [1],
+  '关键词抽段应命中提到小红的段落',
+);
+deepEqual(parseOneBasedIndexes([1, 3, 3, 9], 4), [0, 2], '选题编号应按 1-based 去重截断');
+deepEqual(parseOneBasedIndexes([0, 2], 4), [0, 2], '全是 0-based 时应兼容');
+equal(
+  buildLeafCatalog(
+    [
+      { id: 'a', text: '窗口内', msgIndex: 8 },
+      { id: 'b', text: '窗口外旧事', msgIndex: 2, timeStart: '昨天' },
+      { id: 'c', text: '失效', msgIndex: 1, stale: true },
+    ],
+    new Set(['a']),
+    10,
+  )[0]?.id,
+  'b',
+  '选材目录应排除窗口内叶子和失效叶子',
+);
+
 const { hideTimeFindRegex } = await importStandalone('../src/memory/hideRegex.ts');
 const hideTime = new RegExp(hideTimeFindRegex().slice(1, hideTimeFindRegex().lastIndexOf('/')), 'gi');
 const multilineTags = '<bbs_start>\n1988/9/29 21:30\n</bbs_start>\n正文\n<bbs_end>\n1988/9/29 21:45\n</bbs_end>';
