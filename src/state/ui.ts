@@ -49,6 +49,8 @@ interface UiState {
   showQuickReply: boolean;
   /** 楼层内摘要锚点(查看该楼数据 + 标番外,默认关) */
   showFloorPanel: boolean;
+  /** 顶栏显示自定义变量页(默认关) */
+  showVarsPage: boolean;
   /** 屏幕边缘悬浮球(默认关) */
   showOrb: boolean;
   /** 悬浮球自定义图标(ST 服务器图片路径;空=默认书签图标) */
@@ -78,7 +80,9 @@ const PAGE_STORAGE_KEY = 'bbs.ui.page.v1';
 
 function loadActivePage(): string {
   try {
-    return localStorage.getItem(PAGE_STORAGE_KEY) || 'summary';
+    const id = localStorage.getItem(PAGE_STORAGE_KEY) || 'summary';
+    if (id === 'vars' && !apiSettings.ui.showVarsPage) return 'summary';
+    return id;
   } catch {
     return 'summary';
   }
@@ -102,6 +106,7 @@ export const ui = reactive<UiState>({
   showTopBar: apiSettings.ui.showTopBar,
   showQuickReply: apiSettings.ui.showQuickReply,
   showFloorPanel: apiSettings.ui.showFloorPanel,
+  showVarsPage: apiSettings.ui.showVarsPage,
   showOrb: apiSettings.ui.showOrb,
   orbImage: apiSettings.ui.orbImage,
   orbShape: validOrbShape(apiSettings.ui.orbShape),
@@ -117,11 +122,13 @@ onSettingsReady(() => {
   ui.showTopBar = apiSettings.ui.showTopBar;
   ui.showQuickReply = apiSettings.ui.showQuickReply;
   ui.showFloorPanel = apiSettings.ui.showFloorPanel;
+  ui.showVarsPage = apiSettings.ui.showVarsPage;
   ui.showOrb = apiSettings.ui.showOrb;
   ui.orbImage = apiSettings.ui.orbImage;
   ui.orbShape = validOrbShape(apiSettings.ui.orbShape);
   ui.orbOpacity = apiSettings.ui.orbOpacity;
   ui.orbSize = apiSettings.ui.orbSize;
+  if (ui.activePage === 'vars' && !ui.showVarsPage) ui.activePage = 'summary';
 });
 
 // ui 改变 → 写回 apiSettings.ui(由 settings 的 watch 防抖落盘、跨设备同步);activePage 仍存本机。
@@ -133,6 +140,7 @@ watch(
     ui.showTopBar,
     ui.showQuickReply,
     ui.showFloorPanel,
+    ui.showVarsPage,
     ui.showOrb,
     ui.orbImage,
     ui.orbShape,
@@ -146,11 +154,18 @@ watch(
     apiSettings.ui.showTopBar = ui.showTopBar;
     apiSettings.ui.showQuickReply = ui.showQuickReply;
     apiSettings.ui.showFloorPanel = ui.showFloorPanel;
+    apiSettings.ui.showVarsPage = ui.showVarsPage;
     apiSettings.ui.showOrb = ui.showOrb;
     apiSettings.ui.orbImage = ui.orbImage;
     apiSettings.ui.orbShape = ui.orbShape;
     apiSettings.ui.orbOpacity = ui.orbOpacity;
     apiSettings.ui.orbSize = ui.orbSize;
+  },
+);
+watch(
+  () => ui.showVarsPage,
+  on => {
+    if (!on && ui.activePage === 'vars') ui.activePage = 'summary';
   },
 );
 watch(
@@ -171,6 +186,7 @@ watch(
 export let lastOpenedAt = 0;
 
 export function openBook(page?: string) {
+  if (page === 'vars' && !ui.showVarsPage) page = undefined;
   if (page) ui.activePage = page;
   ui.open = true;
   lastOpenedAt = performance.now();

@@ -1,4 +1,5 @@
 import type { Component } from 'vue';
+import { ui } from '@/state/ui';
 import Items from './items/index.vue';
 import Npcs from './npcs/index.vue';
 import Scenes from './scenes/index.vue';
@@ -29,6 +30,11 @@ export const PAGES: PageDef[] = [
   { id: 'settings', label: '设置', component: Settings },
 ];
 
+export function visiblePages(): PageDef[] {
+  return PAGES.filter(p => p.id !== 'vars' || ui.showVarsPage);
+}
+
 export function getPage(id: string): PageDef {
+  if (id === 'vars' && !ui.showVarsPage) return PAGES[0];
   return PAGES.find(p => p.id === id) ?? PAGES[0];
 }

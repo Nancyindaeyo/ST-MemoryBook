@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import Icon from '@/components/Icon.vue';
-import { PAGES } from '@/pages/registry';
+import { visiblePages } from '@/pages/registry';
 import { closeBook, ui } from '@/state/ui';
 import { updateState } from '@/memory/update';
+import { computed } from 'vue';
 
 const props = defineProps<{ placement: 'top' | 'bottom'; narrow?: boolean }>();
+const pages = computed(() => visiblePages());
 
 // 设置页有可用更新时,在「设置」导航项上亮一个红点角标(提示用户进设置页更新)。
 function showUpdateDot(id: string): boolean {
@@ -25,7 +27,7 @@ function onNavClick(id: string) {
 <template>
   <nav class="bbs-nav" :class="[`is-${placement}`, { 'is-narrow': narrow }]">
     <button
-      v-for="p in PAGES"
+      v-for="p in pages"
       :key="p.id"
       class="bbs-nav-item"
       :class="{ 'is-active': ui.activePage === p.id }"
