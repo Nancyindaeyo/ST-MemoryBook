@@ -643,6 +643,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.summaryOnlyMode = src.summaryOnlyMode;
   target.summarizeAiOnly = src.summarizeAiOnly;
   target.injection = src.injection;
+  target.llmPick = src.llmPick;
   target.keepRecent = src.keepRecent;
   target.excludedChars = src.excludedChars;
   target.excludedWorldNames = src.excludedWorldNames;
@@ -885,10 +886,10 @@ function persist(): void {
  * 若那里还没有、但 localStorage 有旧值,则迁移过去(老用户不丢配置),迁移后清掉旧键。
  * 完成后放行 watch 回写。可安全重复调用(只在首次真正 hydrate)。
  */
-export function hydrateSettings(): void {
-  if (ready) return;
+export function hydrateSettings(): boolean {
+  if (ready) return true;
   const ctx = getContext();
-  if (!ctx?.extensionSettings) return; // ST 未就绪,稍后重试
+  if (!ctx?.extensionSettings) return false; // ST 未就绪,调用方稍后重试
 
   const stored = ctx.extensionSettings[SETTINGS_KEY];
   if (stored && typeof stored === 'object') {
@@ -951,6 +952,7 @@ export function hydrateSettings(): void {
       /* 订阅者自身异常不阻断后续 */
     }
   }
+  return true;
 }
 
 watch(

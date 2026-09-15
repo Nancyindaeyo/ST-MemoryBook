@@ -1,17 +1,18 @@
 import { hydrateSettings } from '@/api/settings';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
 import { runSupplementalRecall } from '@/memory/llmPick';
-import { runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
-import { refreshInjection } from '@/memory/inject';
+import { clearLlmPickInjection } from '@/memory/inject';
+import { clearRecallInjection, runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
 import { syncTimeTagRegex } from '@/memory/timeTag';
-import { bindChatLifecycle } from '@/memory/store';
+import { bindChatLifecycle, flushLeavesNow } from '@/memory/store';
+import { invalidateMemorySession } from '@/memory/session';
 import { checkForUpdate } from '@/memory/update';
 import App from '@/App.vue';
 import { vAutosize } from '@/directives/autosize';
 import { injectMenuButton } from '@/menu';
 import { syncTopBarButton } from '@/topbar';
 import { syncQuickReplyButton } from '@/quickReply';
-import { bindFloorPanel } from '@/floorPanel';
+import { bindFloorPanel, unbindFloorPanel } from '@/floorPanel';
 import { registerPublicInterface } from '@/public/register';
 import { ui } from '@/state/ui';
 import { guardEditableArrowKeys } from '@/st/keyboard';
@@ -43,6 +44,9 @@ const HOST_ID = 'bbs-app-host';
     if (!intercepted && shouldRecallForType(type)) {
       await runVectorRecall();
       await runSupplementalRecall();
+    } else if (!intercepted) {
+      clearRecallInjection();
+      clearLlmPickInjection();
     }
   } catch (e) {
     console.error('[柏宝书] 生成拦截器异常(放行本次生成)', e);
@@ -106,7 +110,19 @@ function mount() {
   app.directive('autosize', vAutosize);
   app.mount(container);
 
-  $(window).on('pagehide', () => app.unmount());
+  const globalKey = '__bbs_app_cleanup__';
+  const globalState = globalThis as Record<string, unknown>;
+  const previousCleanup = globalState[globalKey];
+  if (typeof previousCleanup === 'function') previousCleanup();
+  const cleanup = () => {
+    invalidateMemorySession();
+    void flushLeavesNow().catch(error => console.error('[柏宝书] 卸载前保存叶子失败', error));
+    unbindFloorPanel();
+    app.unmount();
+    if (globalState[globalKey] === cleanup) delete globalState[globalKey];
+  };
+  globalState[globalKey] = cleanup;
+  $(window).off('pagehide.bbsMemoryBook').on('pagehide.bbsMemoryBook', cleanup);
 }
 
 $(() => {
@@ -133,15 +149,17 @@ function bindMemoryWhenReady(attempt = 0) {
     try {
       console.log('[柏宝书] 启动链开始绑定(getContext 就绪)');
       // 设置先 hydrate:从 extension_settings 载入(或从旧 localStorage 迁移),之后才跨设备同步
-      hydrateSettings();
+      if (!hydrateSettings()) {
+        if (attempt <= 40) setTimeout(() => bindMemoryWhenReady(attempt + 1), 500);
+        return;
+      }
+      // 先注册“载入完成”订阅，再启动聊天载入，避免同步载入时错过首轮安全注入。
+      bindEngine();
       bindChatLifecycle();
       // 公共读取接口不依赖记忆引擎开关；聊天载入后立即暴露，供其它插件/脚本读取。
       void registerPublicInterface();
-      bindEngine();
       // 时间标签:按开关注册/移除 ST 隐藏正则(幂等;开关变化的后续同步在 bindEngine 的 watch 里)
       syncTimeTagRegex();
-      // 首屏:把当前聊天已有的记忆挂上注入
-      refreshInjection();
       // 楼内摘要锚点:按设置开关注入(bindFloorPanel 内 watch 开关 + 主题,immediate 首次同步)
       bindFloorPanel();
       // 后台检测更新(实时比对本地/远端 manifest 版本;失败静默,不阻断启动)

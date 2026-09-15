@@ -15,11 +15,12 @@
     "watch": "vite build --watch --mode development"
   },
   "devDependencies": {
+    "@types/node": "^24.13.4",
     "@vitejs/plugin-vue": "^6.0.7",
     "typescript": "^5.7.0",
     "vite": "^7.3.3",
-    "vue-tsc": "^3.3.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.3"
   },
   "dependencies": {
     "vue": "^3.5.35"

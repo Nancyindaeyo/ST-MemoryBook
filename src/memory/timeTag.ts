@@ -13,6 +13,7 @@ import { apiSettings } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
 import { hideTimeFindRegex } from './hideRegex';
 import { stripBaiBaiImageTags } from './imageTag';
+import { stripConfiguredTagBlocks } from './tagSanitizer';
 import type { LeafExtra } from './types';
 
 export { hideTimeFindRegex };
@@ -116,27 +117,9 @@ function leafSwipeMatches(leaf: LeafExtra, m: STMessage): boolean {
   return leafSwipe === msgSwipe;
 }
 
-/**
- * 按标签名生成「整块删除」正则(含标签本身与内部内容)。tag 已由 sanitizeTagName 剔除正则元字符,
- * 拼进 RegExp 安全。边界用前瞻 (?=[\s/>]) 而非 \b —— \b 只认 ASCII 词字符,中文标签(如 <雪>)
- * 在 `雪` 与 `>` 之间无词边界会匹配失败;前瞻「标签名后须紧跟空白/斜杠/右括号」对中英文都成立,
- * 且同样防止 <snow> 误吃 <snowball> 前缀。同时删配对块与落单的自闭/单标签。
- */
-function blockStripRegexes(tag: string): RegExp[] {
-  return [
-    new RegExp(`<${tag}(?=[\\s/>])[^>]*>[\\s\\S]*?</${tag}>`, 'gi'), // 配对块
-    new RegExp(`<\\/?${tag}(?=[\\s/>])[^>]*\\/?>`, 'gi'), // 落单的开/闭/自闭标签
-  ];
-}
-
-/** 删掉用户在设置里配置的自定义标签(整块:标签 + 内部内容)。空名单则原样返回。 */
+/** 树式匹配嵌套标签；落单标签只去外壳，避免一个坏标签吞掉后续整篇正文。 */
 function stripCustomTags(s: string): string {
-  let out = s;
-  for (const tag of apiSettings.customStripTags) {
-    if (!tag) continue;
-    for (const re of blockStripRegexes(tag)) out = out.replace(re, '');
-  }
-  return out;
+  return stripConfiguredTagBlocks(s, apiSettings.customStripTags);
 }
 
 /**

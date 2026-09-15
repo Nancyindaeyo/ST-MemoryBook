@@ -14,7 +14,7 @@
  */
 
 import { getContext, type STMessage } from '@/st/context';
-import { apiSettings, engineActiveHere } from '@/api/settings';
+import { apiSettings, engineActiveHere, resolveVectorModel } from '@/api/settings';
 import type { VecHit } from '@/api/baibaoku';
 import { vecSearch } from './store';
 import { getLeaf, leafValid } from '../apply';
@@ -26,7 +26,9 @@ import { currentBundleHashes, currentChatId, currentChatScope, currentVectorDb, 
 import { isAiFloor, resolveKeepStart } from '../engine';
 import { cleanBody, compactTimeLabel, latestStoryTime, splitTimeLabel } from '../timeTag';
 import { relativeTimeLabel } from '../timeRel';
+import { MEMORY_KEY } from '../types';
 import { normalizeRecallInjectionDepth } from './depth';
+import { beginMemorySessionOperation, isStaleMemorySessionError } from '../session';
 import { RECALL_CACHE_STORAGE_KEY } from './cache';
 import {
   previewOf,
@@ -150,14 +152,28 @@ function saveRecallCache(cache: RecallCache): void {
  * 召回参数指纹:覆盖全部影响最终注入文本的档位参数。
  * 注入深度只改变同一文本的位置,不改变检索结果,故不计入并可直接复用缓存。
  */
-function recallParamFingerprint(cfg: typeof apiSettings.vector.recall): string {
-  return [
-    cfg.rerankCandidates,
-    cfg.embeddingThreshold,
-    cfg.rerankThreshold,
-    cfg.fullTextCount,
-    cfg.finalRecallCount,
-  ].join(',');
+function recallParamFingerprint(
+  cfg: typeof apiSettings.vector.recall,
+  scopes: string[],
+  database: string,
+): string {
+  const endpoint = (role: 'embedding' | 'rerank' | 'queryRewrite') => {
+    const value = resolveVectorModel(role);
+    return [value.url, value.model];
+  };
+  return fnv1a(JSON.stringify({
+    cfg,
+    database,
+    scopes,
+    keepRecent: apiSettings.keepRecent,
+    customStripTags: [...apiSettings.customStripTags].sort(),
+    queryRewriteJailbreak: apiSettings.vector.queryRewriteJailbreak,
+    queryRewriteMaxTokens: apiSettings.vector.queryRewriteMaxTokens,
+    jailbreakPrompt: apiSettings.vector.queryRewriteJailbreak ? apiSettings.prompts.jailbreak : '',
+    embedding: endpoint('embedding'),
+    rerank: endpoint('rerank'),
+    queryRewrite: endpoint('queryRewrite'),
+  }));
 }
 
 /**
@@ -168,7 +184,12 @@ function recallParamFingerprint(cfg: typeof apiSettings.vector.recall): string {
  *    取了它缓存永不命中、白做。取 user 之前的稳定 AI 楼才对。
  * 缺 chatId 或无 user 楼 → 返回 null,本轮不走缓存(照常实算)。
  */
-function buildRecallCacheKey(chat: STMessage[], cfg: typeof apiSettings.vector.recall): string | null {
+function buildRecallCacheKey(
+  chat: STMessage[],
+  cfg: typeof apiSettings.vector.recall,
+  scopes: string[],
+  database: string,
+): string | null {
   const chatId = currentChatId();
   if (!chatId) return null;
 
@@ -190,10 +211,28 @@ function buildRecallCacheKey(chat: STMessage[], cfg: typeof apiSettings.vector.r
     }
   }
 
-  return `${chatId}|${userIdx}|${fnv1a(userText)}|${fnv1a(aiText)}|${recallParamFingerprint(cfg)}`;
+  const memoryFingerprint = fnv1a(JSON.stringify(getContext()?.chatMetadata?.[MEMORY_KEY] ?? null));
+  return `${chatId}|${userIdx}|${fnv1a(userText)}|${fnv1a(aiText)}|${memoryFingerprint}|${recallParamFingerprint(cfg, scopes, database)}`;
 }
 
-let recalling = false;
+let activeRecallAbort: AbortController | null = null;
+
+function linkAbortSignals(signals: Array<AbortSignal | undefined>): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const active = signals.filter((item): item is AbortSignal => !!item);
+  const abort = () => controller.abort();
+  for (const item of active) {
+    if (item.aborted) abort();
+    else item.addEventListener('abort', abort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => active.forEach(item => item.removeEventListener('abort', abort)),
+  };
+}
 
 /** 召回是否在当前聊天生效。 */
 function recallActiveHere(): boolean {
@@ -222,7 +261,6 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     clearRecallInjection();
     return;
   }
-  if (recalling) return;
   const database = currentVectorDb();
   if (!database) return;
 
@@ -242,7 +280,7 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
   const scopes = recallScopes();
 
   // 缓存命中(重生成/翻页且召回输入未变):直接复用上次注入文本 + 调试快照,跳过整条管线。
-  const cacheKey = buildRecallCacheKey(chat, cfg);
+  const cacheKey = buildRecallCacheKey(chat, cfg, scopes, database);
   const cached = cacheKey ? loadRecallCache() : null;
   if (cacheKey && cached && cached.key === cacheKey) {
     fn(RECALL_INJECT_KEY, cached.text, IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
@@ -251,17 +289,29 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     return;
   }
 
-  recalling = true;
+  activeRecallAbort?.abort();
+  const localAbort = new AbortController();
+  activeRecallAbort = localAbort;
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    if (activeRecallAbort === localAbort) activeRecallAbort = null;
+    return;
+  }
+  const linkedAbort = linkAbortSignals([signal, localAbort.signal, operation.signal]);
+  const taskSignal = linkedAbort.signal;
   try {
     // 开一次新调试快照(进入有效召回路径才记录,避免「功能未启用」时反复清空上次结果)
     resetRecallDebug();
 
     // 召回前先补齐窗口外缺失的向量索引(载入老聊天/向量后开 → 旧叶子可能从未索引),
     // 否则这些旧剧情会直接漏召回。只阻塞窗口外,窗口内交给防抖增量。
-    await ensureRecallIndex(signal);
+    await ensureRecallIndex(taskSignal);
+    operation.assertCurrent();
 
     // 1) 查询重写:得多条 query 向量 + rerank 用的 query 文本。失败则降级为最近上下文单 query。
-    const { queryVectors, rerankQuery } = await resolveQueryVectors(signal);
+    const { queryVectors, rerankQuery } = await resolveQueryVectors(taskSignal);
+    operation.assertCurrent();
     if (!queryVectors.length) {
       setRecallStatus('未召回:没有可用的检索 query');
       clearRecallInjection();
@@ -275,6 +325,7 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
       topK: Math.max(1, cfg.rerankCandidates),
       excludeLeafIds: exclude,
     });
+    operation.assertCurrent();
     setRecallEmbedding(
       results.map(h => ({
         leafId: h.leafId,
@@ -292,7 +343,8 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     }
 
     // 3) rerank(用 INTENT/重写 query;渠道未配 → 降级:用 embedding 序,score 复用 similarity)
-    const ranked = await rerankCandidates(rerankQuery, results, signal);
+    const ranked = await rerankCandidates(rerankQuery, results, taskSignal);
+    operation.assertCurrent();
 
     // 4) 分档 + 上限(now = 故事内最新时间,作相对时间参照点,对齐历史摘要注入)
     const now = latestStoryTime(chat);
@@ -304,11 +356,14 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     // 实算成功才落缓存(失败/降级路径不缓存,下次重试)。存调试快照供命中时还原面板。
     if (cacheKey) saveRecallCache({ key: cacheKey, text, debug: snapshotRecallDebug() });
   } catch (e) {
+    if (isStaleMemorySessionError(e) || operation.signal.aborted || localAbort.signal.aborted) return;
     console.warn('[柏宝书向量] 召回失败(降级为不召回):', e);
     setRecallStatus(`失败:${e instanceof Error ? e.message : String(e)}`);
     clearRecallInjection();
   } finally {
-    recalling = false;
+    linkedAbort.dispose();
+    operation.dispose();
+    if (activeRecallAbort === localAbort) activeRecallAbort = null;
   }
 }
 
@@ -396,7 +451,8 @@ async function rerankCandidates(query: string, hits: VecHit[], signal?: AbortSig
     return order
       .filter(o => hits[o.index])
       .map(o => ({ ...hits[o.index], rerankScore: o.score }));
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     // 降级:保持 embedding 序,rerankScore 复用 similarity
     return hits.map(h => ({ ...h, rerankScore: h.similarity }));
   }

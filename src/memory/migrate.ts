@@ -413,7 +413,7 @@ export async function runHoraeMigration(): Promise<boolean> {
     memory.summaries.splice(0, memory.summaries.length, ...newSummaries);
     recomputeDerived();
     saveMemory();
-    flushLeavesNow();
+    await flushLeavesNow(ctx);
     if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
     // 检测一次隐藏:把已被摘要覆盖、滚出保留窗口的旧楼层隐藏掉(复用摘要收尾同款逻辑),
     // 避免迁移后全文与摘要在上下文里重复;内部已含刷新注入。

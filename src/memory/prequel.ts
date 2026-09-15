@@ -72,6 +72,36 @@ export function pickPrequelByKeywords(chunks: string[], haystack: string, max: n
   return scored.slice(0, limit).map(x => x.index).sort((a, b) => a - b);
 }
 
+/** 保守估算中英文混排 token，供前情选段在真正注入前执行硬预算。 */
+export function estimatePrequelTokens(text: string): number {
+  let cjk = 0;
+  for (const char of String(text ?? '')) {
+    if (/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/u.test(char)) cjk++;
+  }
+  const other = Math.max(0, String(text ?? '').length - cjk);
+  return Math.ceil((cjk * 1.35 + other * 0.45 + 8) * 1.15);
+}
+
+/**
+ * 按候选优先级装入预算，再恢复原文顺序。单段超预算时跳过，避免一段长前情挤掉其余命中。
+ */
+export function fitPrequelIndexesToBudget(chunks: string[], indexes: number[], maxTokens: number): number[] {
+  const budget = Math.max(0, Math.floor(Number(maxTokens) || 0));
+  if (!budget) return [];
+  const selected: number[] = [];
+  const seen = new Set<number>();
+  let used = 0;
+  for (const index of indexes) {
+    if (!Number.isInteger(index) || index < 0 || index >= chunks.length || seen.has(index)) continue;
+    const cost = estimatePrequelTokens(chunks[index]);
+    if (used + cost > budget) continue;
+    seen.add(index);
+    selected.push(index);
+    used += cost;
+  }
+  return selected.sort((a, b) => a - b);
+}
+
 /**
  * 读模型返回的编号数组。提示词约定 1-based;若看起来全是 0-based 再兼容一次。
  * 返回去重后的 0-based 下标。

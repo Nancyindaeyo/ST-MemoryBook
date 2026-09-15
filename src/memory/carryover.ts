@@ -377,8 +377,7 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     // 落盘 + 重算 + 刷新
     recomputeDerived();
     saveMemory();
-    flushLeavesNow();
-    await targetCtx.saveChat();
+    await flushLeavesNow(targetCtx);
     if (typeof targetCtx.saveMetadata === 'function') await targetCtx.saveMetadata();
     if (typeof targetCtx.reloadCurrentChat === 'function') await targetCtx.reloadCurrentChat();
     refreshInjection();

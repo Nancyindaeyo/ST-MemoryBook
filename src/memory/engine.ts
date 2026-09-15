@@ -9,6 +9,15 @@ import { addSummary, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, inva
 import { filterSummaryFeedIndices, summaryFeedNote } from './summaryFeed';
 import { extractJsonObject } from './json';
 import { cleanExactQuotes } from './quotes';
+import {
+  beginMemorySessionOperation,
+  invalidateMemorySession,
+  isStaleMemorySessionError,
+  onMemorySessionInvalidated,
+  onMemorySessionLoaded,
+  waitForMemorySessionLoaded,
+  type MemorySessionOperation,
+} from './session';
 import { clearInjection, clearLlmPickInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, selectRecentResolvedPlans, THINKING_CHECKLIST, THINKING_PREFILL } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
@@ -69,12 +78,41 @@ export function cancelBatchBackfill(): void {
 }
 
 let busy = false;
+let busyOwnerSeq = 0;
+let activeBusyOwner = 0;
 // 当前在飞的摘要完成信号:拦截器可 await 它(成功/失败都 resolve,永不 reject,故不会卡死生成)。
 // 无在飞摘要时为 null。在 runSummary 头尾维护。
 let currentRun: Promise<void> | null = null;
 let summaryRunSeq = 0;
 export function currentSummaryPromise(): Promise<void> | null {
   return currentRun;
+}
+
+function beginBusyWork(): number {
+  const owner = ++busyOwnerSeq;
+  activeBusyOwner = owner;
+  busy = true;
+  engineState.running = true;
+  return owner;
+}
+
+function endBusyWork(owner: number): void {
+  if (activeBusyOwner !== owner) return;
+  busy = false;
+  engineState.running = false;
+}
+
+function detachInvalidatedWork(): void {
+  activeBusyOwner = ++busyOwnerSeq;
+  busy = false;
+  currentRun = null;
+  engineState.running = false;
+  floorBackfillOwnerRunId = null;
+  floorBackfillState.running = false;
+  floorBackfillState.floor = null;
+  floorBackfillState.chatId = '';
+  batchState.running = false;
+  batchState.cancelRequested = false;
 }
 
 /** 把消息渲染成给摘要模型的文本(cleanBody:裁正文段 + 整块删噪声标签 + 时间标签转文本) */
@@ -549,6 +587,11 @@ export async function handleGenerationIntercept(
   const ctx = getContext();
   if (!ctx) return false;
   if (!ctx.getCurrentChatId?.()) return false; // 欢迎页:无聊天不拦
+  if (!(await waitForMemorySessionLoaded(5000))) {
+    abort(true);
+    toast('当前聊天记忆仍在载入，请稍后重试发送', 'warning');
+    return true;
+  }
   const chat = ctx.chat ?? [];
   normalizeBacklogNotices(chat); // 兼容升级前已存在但尚未标记的提示楼
   const skipLastAi = shouldSkipLastAiForGeneration(chat, type);
@@ -628,7 +671,9 @@ export async function handleGenerationIntercept(
 
 /** 摘要后的统一收尾:同步滑动隐藏 + 刷新注入(自动隐藏已并入摘要流程,不再有独立开关) */
 async function afterSummaryHideAndInject(chat: STMessage[]): Promise<void> {
+  if (getContext()?.chat !== chat) return;
   await syncWindowHiddenState(chat);
+  if (getContext()?.chat !== chat) return;
   refreshInjection();
 }
 
@@ -859,7 +904,7 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
   const covered = coveredSet(chat);
   const imported = importedHistoryRanges();
   const ctx = getContext();
-  if (!ctx) return;
+  if (!ctx || ctx.chat !== chat) return;
 
   const toHide: number[] = [];
   const toUnhide: number[] = [];
@@ -880,6 +925,7 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
   const exec = ctx.executeSlashCommandsWithOptions;
   if (typeof exec === 'function') {
     for (const [start, end] of coalesceRanges(toUnhide)) {
+      if (getContext()?.chat !== chat) return;
       const arg = start === end ? `${start}` : `${start}-${end}`;
       try {
         for (let i = start; i <= end; i++) {
@@ -889,6 +935,7 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
           m.extra = extra;
         }
         await exec(`/unhide ${arg}`);
+        if (getContext()?.chat !== chat) return;
       } catch (e) {
         // /unhide 失败则回退到直接写 is_system,保证取消隐藏一定落地
         for (let i = start; i <= end; i++) {
@@ -905,11 +952,13 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
     }
 
     for (const [start, end] of coalesceRanges(toHide)) {
+      if (getContext()?.chat !== chat) return;
       const arg = start === end ? `${start}` : `${start}-${end}`;
       try {
         // 预写私有标记 + 内存态,防止 /hide 异步期间的竞态 saveChat 覆盖
         for (let i = start; i <= end; i++) if (chat[i]) chat[i].extra = { ...(chat[i].extra ?? {}), bbs_hidden: true };
         await exec(`/hide ${arg}`);
+        if (getContext()?.chat !== chat) return;
       } catch (e) {
         // /hide 失败则回退到直接写 is_system,保证隐藏一定落地
         for (let i = start; i <= end; i++) if (chat[i]) chat[i].is_system = true;
@@ -955,15 +1004,19 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
  */
 function resolveSender(
   task: TaskType,
+  signal?: AbortSignal,
 ): { send: (messages: ChatMsg[]) => Promise<string>; label: string } | { error: string } {
   const channel = getChannelForTask(task);
   if (channel) {
-    return { send: messages => requestCompletion(channel, messages), label: `渠道「${channel.name}」(${channel.model})` };
+    return {
+      send: messages => requestCompletion(channel, messages, { signal }),
+      label: `渠道「${channel.name}」(${channel.model})`,
+    };
   }
   if (!mainApiAvailable()) {
     return { error: '未指派副 API 渠道,且当前主 API 不可用(请填好主 API 后重试,或为本任务单独指派渠道)' };
   }
-  return { send: messages => requestViaMainApi(messages), label: '主 API(主界面当前在用)' };
+  return { send: messages => requestViaMainApi(messages, { signal }), label: '主 API(主界面当前在用)' };
 }
 
 /**
@@ -1125,6 +1178,7 @@ async function summarizeFloorWork(
   aiFloor: number,
   sender: { send: (messages: ChatMsg[]) => Promise<string>; label: string },
   options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart'> = {},
+  operation?: MemorySessionOperation,
 ): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('无 ST 上下文');
@@ -1146,6 +1200,7 @@ async function summarizeFloorWork(
   const history = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, chat, beforeIndex));
 
   const worldInfo = await fetchWorldInfo(chat, targets, ctx.name1, ctx.name2);
+  operation?.assertCurrent();
   const charCard = fetchCharCard();
   const persona = fetchUserPersona();
 
@@ -1196,6 +1251,7 @@ async function summarizeFloorWork(
     return { ...d, summary } as SummaryDelta & { summary: string };
   });
 
+  operation?.assertCurrent();
   applyLeafForFloor(chat, aiFloor, delta, stateBefore, options.replaceLeaf);
   engineState.lastRunAt = Date.now();
 
@@ -1209,12 +1265,6 @@ async function summarizeFloorWork(
 async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {}): Promise<void> {
   if (!engineActiveHere()) { console.log('[柏宝书] runSummary 早退:插件总开关关闭或当前角色被排除'); return; }
   if (busy) { console.log('[柏宝书] runSummary 早退:busy'); return; }
-  const sender = resolveSender('summary');
-  if ('error' in sender) {
-    engineState.lastError = sender.error;
-    console.log('[柏宝书] runSummary 早退:', sender.error);
-    return;
-  }
   const ctx = getContext();
   if (!ctx) return;
   const chat = ctx.chat ?? [];
@@ -1223,20 +1273,33 @@ async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {})
     engineState.lastError = `重新摘要失败:楼层 #${aiFloor} 的原摘要已发生变化`;
     return;
   }
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    return;
+  }
+  const sender = resolveSender('summary', operation.signal);
+  if ('error' in sender) {
+    operation.dispose();
+    engineState.lastError = sender.error;
+    console.log('[柏宝书] runSummary 早退:', sender.error);
+    return;
+  }
   console.log('[柏宝书] runSummary 即将发请求,', sender.label);
 
-  busy = true;
-  engineState.running = true;
+  const busyOwner = beginBusyWork();
   engineState.lastError = '';
   try {
-    await summarizeFloorWork(chat, aiFloor, sender, options);
+    await summarizeFloorWork(chat, aiFloor, sender, options, operation);
     // 摘要积累到阈值则触发总结
     if (options.checkResummary !== false) await checkResummary();
   } catch (e) {
-    engineState.lastError = e instanceof Error ? e.message : String(e);
+    if (!isStaleMemorySessionError(e) && !operation.signal.aborted) {
+      engineState.lastError = e instanceof Error ? e.message : String(e);
+    }
   } finally {
-    busy = false;
-    engineState.running = false;
+    operation.dispose();
+    endBusyWork(busyOwner);
   }
 }
 
@@ -1296,6 +1359,7 @@ async function summarizeBatchWork(
   chat: STMessage[],
   block: number[],
   sender: { send: (messages: ChatMsg[]) => Promise<string>; label: string },
+  operation?: MemorySessionOperation,
 ): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('无 ST 上下文');
@@ -1318,6 +1382,7 @@ async function summarizeBatchWork(
 
   // 世界书按整块合并正文激活一次(省去逐楼激活)
   const worldInfo = await fetchWorldInfo(chat, allTargets, ctx.name1, ctx.name2);
+  operation?.assertCurrent();
   const charCard = fetchCharCard();
   const persona = fetchUserPersona();
 
@@ -1366,6 +1431,7 @@ async function summarizeBatchWork(
     return cleaned as Array<SummaryDelta & { summary: string }>;
   });
 
+  operation?.assertCurrent();
   // 逐楼落叶(块内顺序,严格按 block 升序)。批量只取 summary + 起止时间 + 地点:
   // 显式剥掉 items/plans —— 这些跨多楼难保顺序正确(易致计划错乱),
   // 即便 AI 不听话硬产了也丢弃。物品/计划交给后续正常的逐楼自动摘要。
@@ -1403,20 +1469,27 @@ async function summarizeBatchWork(
 export async function batchBackfill(opts: BatchBackfillOpts = {}): Promise<BatchBackfillResult> {
   if (!engineActiveHere()) return { done: 0, total: 0, cancelled: false };
   if (busy) return { done: 0, total: 0, cancelled: false };
-  const sender = resolveSender('summary');
-  if ('error' in sender) {
-    engineState.lastError = sender.error;
-    return { done: 0, total: 0, cancelled: false };
-  }
   const ctx = getContext();
   if (!ctx) return { done: 0, total: 0, cancelled: false };
   const chat = ctx.chat ?? [];
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    return { done: 0, total: 0, cancelled: false };
+  }
+  const sender = resolveSender('summary', operation.signal);
+  if ('error' in sender) {
+    operation.dispose();
+    engineState.lastError = sender.error;
+    return { done: 0, total: 0, cancelled: false };
+  }
 
   // 目标楼层:显式传入则过滤成「当前确实待摘的 AI 楼」(防陈旧),否则取全部待摘
   const pending = new Set(pendingAiFloors(chat));
   const floors = (opts.floors ?? [...pending]).filter(f => pending.has(f)).sort((a, b) => a - b);
   const total = floors.length;
   if (total === 0) {
+    operation.dispose();
     await afterSummaryHideAndInject(chat);
     return { done: 0, total: 0, cancelled: false };
   }
@@ -1424,8 +1497,7 @@ export async function batchBackfill(opts: BatchBackfillOpts = {}): Promise<Batch
   const batches = planBatches(chat, floors, apiSettings.batchMaxChars, apiSettings.batchMaxFloors);
   console.log('[柏宝书] 批量补摘:', total, '楼 →', batches.length, '批,', sender.label);
 
-  busy = true;
-  engineState.running = true;
+  const busyOwner = beginBusyWork();
   engineState.lastError = '';
   // 批量状态(模块级单例)→ UI 跨关窗重开可恢复进度/取消
   batchState.running = true;
@@ -1438,15 +1510,17 @@ export async function batchBackfill(opts: BatchBackfillOpts = {}): Promise<Batch
     for (const block of batches) {
       if (batchState.cancelRequested) { cancelled = true; break; }
       try {
-        await summarizeBatchWork(chat, block, sender);
+        await summarizeBatchWork(chat, block, sender, operation);
       } catch (e) {
+        if (isStaleMemorySessionError(e) || operation.signal.aborted) throw e;
         // 整块失败(已含重试)→ 回退:逐楼单独摘。单楼也可能失败(写 lastError),失败楼留作待摘,不中断后续。
         console.log('[柏宝书] 批量块失败,回退逐楼:', e instanceof Error ? e.message : String(e));
         for (const f of block) {
           if (!isAiFloor(chat[f]) || leafValid(chat[f])) continue; // 已被填或非 AI 楼:跳过
           try {
-            await summarizeFloorWork(chat, f, sender);
+            await summarizeFloorWork(chat, f, sender, {}, operation);
           } catch (e2) {
+            if (isStaleMemorySessionError(e2) || operation.signal.aborted) throw e2;
             engineState.lastError = e2 instanceof Error ? e2.message : String(e2);
           }
         }
@@ -1458,14 +1532,18 @@ export async function batchBackfill(opts: BatchBackfillOpts = {}): Promise<Batch
     // 连锁触发总结(可能跨多层),失败写 lastError 不影响已落叶子
     await checkResummary();
   } catch (e) {
-    engineState.lastError = e instanceof Error ? e.message : String(e);
+    if (!isStaleMemorySessionError(e) && !operation.signal.aborted) {
+      engineState.lastError = e instanceof Error ? e.message : String(e);
+    }
   } finally {
-    busy = false;
-    engineState.running = false;
-    batchState.running = false;
-    batchState.cancelRequested = false;
+    operation.dispose();
+    endBusyWork(busyOwner);
+    if (activeBusyOwner === busyOwner) {
+      batchState.running = false;
+      batchState.cancelRequested = false;
+    }
   }
-  await afterSummaryHideAndInject(chat);
+  if (operation.isCurrent()) await afterSummaryHideAndInject(chat);
   return { done, total, cancelled };
 }
 
@@ -1562,13 +1640,19 @@ export async function checkResummary(): Promise<number> {
   const ctx = getContext();
   if (!ctx) return 0;
   const chat = ctx.chat ?? [];
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    return 0;
+  }
 
   let made = 0; // 本次连锁共生成的总结条数
 
   // 最高现存压缩层级,作为连锁上限(+1 容纳新生成的层)
   const maxLevel = memory.summaries.reduce((m, s) => Math.max(m, s.level), 0);
 
-  for (let level = 0; level <= maxLevel + 1; level++) {
+  try {
+    for (let level = 0; level <= maxLevel + 1; level++) {
     const threshold = thresholdForLevel(level);
     if (!threshold || threshold < 2) continue;
 
@@ -1579,7 +1663,7 @@ export async function checkResummary(): Promise<number> {
     const keep = level === 0 ? Math.max(0, apiSettings.leafKeepRecent) : 0;
     if (roots.length < threshold + keep) continue;
 
-    const sender = resolveSender('resummary');
+    const sender = resolveSender('resummary', operation.signal);
     if ('error' in sender) {
       engineState.lastError = sender.error;
       return made;
@@ -1608,6 +1692,7 @@ export async function checkResummary(): Promise<number> {
         return { summary };
       });
 
+      operation.assertCurrent();
       // 生成上层节点收纳这批(**不删 batch**),时间戳取批内最新,排在它们之后
       const newCreatedAt = Math.max(...batch.map(s => s.createdAt)) + 1;
       // 起止时间:batch 已按时间升序 → 首个有起始的作 start,末个有结束的作 end
@@ -1626,11 +1711,15 @@ export async function checkResummary(): Promise<number> {
       refreshInjection();
       // 不 break:继续外层 for,上一层可能也攒够了 → 连锁压更高层
     } catch (e) {
+      if (isStaleMemorySessionError(e) || operation.signal.aborted) return made;
       engineState.lastError = e instanceof Error ? e.message : String(e);
       return made; // 本层失败则停止连锁,下次再试
     }
   }
-  return made;
+    return made;
+  } finally {
+    operation.dispose();
+  }
 }
 
 /* ============ 手动强制总结(多选合并,无视阈值) ============ */
@@ -1737,15 +1826,22 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     }
   }
 
-  const sender = resolveSender('resummary');
-  if ('error' in sender) return { made: 0, error: sender.error };
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    return { made: 0, error: '当前聊天记忆仍在载入，请稍后重试' };
+  }
+  const sender = resolveSender('resummary', operation.signal);
+  if ('error' in sender) {
+    operation.dispose();
+    return { made: 0, error: sender.error };
+  }
 
   const level = Math.max(...picked.map(n => n.level)) + 1;
   const content = joinNodesForResummary(picked);
   const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level });
 
-  busy = true;
-  engineState.running = true;
+  const busyOwner = beginBusyWork();
   engineState.lastError = '';
   try {
     const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
@@ -1763,6 +1859,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
       return { summary };
     });
 
+    operation.assertCurrent();
     // 时间范围:picked 已按楼层升序 → 首个有起始的作 start,末个有结束的作 end(同 checkResummary)
     const timeStart = picked.find(s => s.timeStart)?.timeStart;
     const timeEnd = [...picked].reverse().find(s => s.timeEnd)?.timeEnd;
@@ -1777,14 +1874,17 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     engineState.lastRunAt = Date.now();
     recomputeDerived();
   } catch (e) {
+    if (isStaleMemorySessionError(e) || operation.signal.aborted) {
+      return { made: 0, error: '聊天已切换，旧总结结果已丢弃' };
+    }
     const msg = e instanceof Error ? e.message : String(e);
     engineState.lastError = msg;
     return { made: 0, error: msg };
   } finally {
-    busy = false;
-    engineState.running = false;
+    operation.dispose();
+    endBusyWork(busyOwner);
   }
-  await afterSummaryHideAndInject(chat);
+  if (operation.isCurrent()) await afterSummaryHideAndInject(chat);
   return { made: 1 };
 }
 
@@ -1796,14 +1896,12 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
 export async function resummarizeNow(): Promise<number> {
   if (!engineActiveHere()) return 0;
   if (busy) return 0;
-  busy = true;
-  engineState.running = true;
+  const busyOwner = beginBusyWork();
   engineState.lastError = '';
   try {
     return await checkResummary();
   } finally {
-    busy = false;
-    engineState.running = false;
+    endBusyWork(busyOwner);
   }
 }
 
@@ -1847,12 +1945,28 @@ export function bindEngine(): void {
   if (!ctx?.eventSource || !ctx?.eventTypes) return;
   const es = ctx.eventSource;
   const et = ctx.eventTypes;
+  const globalKey = '__bbs_engine_cleanup__';
+  const globalState = globalThis as Record<string, unknown>;
+  const previousCleanup = globalState[globalKey];
+  if (typeof previousCleanup === 'function') previousCleanup();
+  const bindings: Array<{ event: string; handler: (...args: any[]) => void }> = [];
+  const stops: Array<() => void> = [];
+  const bind = (event: string | undefined, handler: (...args: any[]) => void) => {
+    if (!event) return;
+    es.on(event, handler);
+    bindings.push({ event, handler });
+  };
 
   normalizeBacklogNotices(ctx.chat ?? []);
   console.log('[柏宝书] bindEngine 执行,监听', et.USER_MESSAGE_RENDERED, et.GENERATION_STARTED);
+  stops.push(onMemorySessionInvalidated(detachInvalidatedWork));
+  stops.push(onMemorySessionLoaded(() => {
+    normalizeBacklogNotices(getContext()?.chat ?? []);
+    refreshInjection();
+  }));
 
   // 发新消息:此刻末尾 AI 是「上一条已定稿」的回复,从最早缺口开始顺序追赶到它。
-  es.on(et.USER_MESSAGE_RENDERED, () => {
+  bind(et.USER_MESSAGE_RENDERED, () => {
     console.log('[柏宝书] USER_MESSAGE_RENDERED → 摘上一条 AI');
     void maybeSummarizePrevAi(false);
   });
@@ -1862,7 +1976,7 @@ export function bindEngine(): void {
   // ⚠️ 这里放行的 type(quiet/impersonate/continue)必须与 handleGenerationIntercept 第一道闸严格一致——
   //    两者口径一旦不同步,重生/翻页会出现「补摘」与「正文生成」并行(见拦截器注释的「关键时序/口径」)。
   if (et.GENERATION_STARTED) {
-    es.on(et.GENERATION_STARTED, (type?: string, _opts?: unknown, dryRun?: boolean) => {
+    bind(et.GENERATION_STARTED, (type?: string, _opts?: unknown, dryRun?: boolean) => {
       if (dryRun) return;
       if (type === 'quiet' || type === 'impersonate' || type === 'continue') return; // 非真实新回复
       const chat = getContext()?.chat ?? [];
@@ -1873,11 +1987,11 @@ export function bindEngine(): void {
   }
 
   // 以下三事件只让数据/UI 跟随,不主动生成摘要。
-  if (et.MESSAGE_SWIPED) es.on(et.MESSAGE_SWIPED, () => reactToChatMutation());
+  bind(et.MESSAGE_SWIPED, () => reactToChatMutation());
   // 编辑消息:先把该楼正文里 <bbs_items> 旁注的改动反向同步回叶子 delta(用户手改物品),
   // 再走通用善后(清坏链/重算/刷新)。延迟一拍确保 ST 已把编辑写回 chat[messageId].mes。
   if (et.MESSAGE_EDITED) {
-    es.on(et.MESSAGE_EDITED, (messageId?: number) => {
+    bind(et.MESSAGE_EDITED, (messageId?: number) => {
       setTimeout(() => {
         if (typeof messageId === 'number') {
           try { syncItemLogFromMessage(messageId); } catch (e) { console.warn('[柏宝书] 物品旁注反解析失败', e); }
@@ -1886,46 +2000,60 @@ export function bindEngine(): void {
       }, 0);
     });
   }
-  if (et.MESSAGE_DELETED) es.on(et.MESSAGE_DELETED, () => reactToChatMutation(true));
+  bind(et.MESSAGE_DELETED, () => reactToChatMutation(true));
 
   // AI 新回复落定:不一定会触发摘要(自动摘要关闭 / 它不是「上一条 AI」),
   // 但「未摘要楼层」列表必须跟上新增的 AI 楼,故无条件重算一次派生缓存(不发请求)。
-  if (et.CHARACTER_MESSAGE_RENDERED) es.on(et.CHARACTER_MESSAGE_RENDERED, () => recomputeDerived());
+  bind(et.CHARACTER_MESSAGE_RENDERED, () => recomputeDerived());
 
   if (et.CHAT_CHANGED) {
-    es.on(et.CHAT_CHANGED, () => {
-      // 记忆重载由 store 的 CHAT_CHANGED 监听负责;此处仅在其后刷新注入
-      clearRecallInjection(); // 切聊天先抹掉上个聊天的召回残留(新聊天下次生成再重算)
-      clearLlmPickInjection();
-      setTimeout(() => {
-        normalizeBacklogNotices(getContext()?.chat ?? []);
-        refreshInjection();
-      }, 0);
+    bind(et.CHAT_CHANGED, () => {
+      // store 完成新聊天载入后会触发 onMemorySessionLoaded 再注入；载入窗口内必须保持全槽为空。
+      clearInjection();
+      clearRecallInjection();
     });
   }
 
   // 总开关切换:关闭→清掉已注入的记忆槽(不动已隐藏楼层与已存摘要,符合「已有数据不处理」);
   // 开启→把当前记忆重新注入回上下文。仅响应切换,不在首帧触发。
-  watch(
+  stops.push(watch(
     () => apiSettings.enabled,
-    on => (on ? refreshInjection() : clearInjection()),
-  );
+    on => {
+      if (on) refreshInjection();
+      else {
+        invalidateMemorySession();
+        clearInjection();
+      }
+    },
+  ));
 
   // 自动摘要开关切换:时间标签(隐藏正则 + 固定提示词)随它启停,不再独立开关。
-  watch(
+  stops.push(watch(
     () => apiSettings.autoSummaryEnabled,
     () => {
       syncTimeTagRegex();
       refreshInjection();
     },
-  );
+  ));
 
   // 仅摘要模式切换后立即刷新持久化的 ST 提示槽;正文中的既有旁注不主动清理。
-  watch(
+  stops.push(watch(
     () => apiSettings.summaryOnlyMode,
     on => {
       if (on) clearLlmPickInjection();
       refreshInjection();
     },
-  );
+  ));
+
+  const cleanup = () => {
+    invalidateMemorySession();
+    for (const binding of bindings) es.off?.(binding.event, binding.handler);
+    for (const stop of stops) stop();
+    if (reactTimer) {
+      clearTimeout(reactTimer);
+      reactTimer = null;
+    }
+    if (globalState[globalKey] === cleanup) delete globalState[globalKey];
+  };
+  globalState[globalKey] = cleanup;
 }

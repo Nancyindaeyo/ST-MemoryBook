@@ -287,12 +287,14 @@ export function mainApiAvailable(): boolean {
  * 走 ST 的 generateRaw:只发我们给的这几条消息,不带聊天历史/角色卡;无需连接档。
  * quiet 类型内部强制非流式,返回清洗后的整段文本;失败抛 ApiError。
  */
-export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptions = {}): Promise<string> {
+export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOptions = {}): Promise<string> {
   const ctx = getContext();
   if (typeof ctx?.generateRaw !== 'function') {
     throw new ApiError('当前 ST 版本不支持 generateRaw,无法跟随主 API');
   }
+  if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const content = (await ctx.generateRaw({ prompt: messages, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
+  if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   if (!content) throw new ApiError('主 API 返回空内容');
   return content;
 }

@@ -52,7 +52,7 @@
 在 SillyTavern 的「扩展 → 安装扩展」里填入本仓库地址即可：
 
 ```
-https://github.com/baibai-git/ST-BaiBai-Book
+https://github.com/Nancyindaeyo/ST-MemoryBook
 ```
 
 安装后进入柏宝书的「设置」页，打开总开关「柏宝书 · 记忆引擎」，按需配置摘要与向量记忆，就能开始使用了。设置会随 SillyTavern 保存在服务器，跨设备、跨局域网自动同步。

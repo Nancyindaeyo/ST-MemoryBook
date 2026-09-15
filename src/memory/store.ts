@@ -1,9 +1,14 @@
 import { apiSettings, currentCharKey } from '@/api/settings';
-import { getContext, type STMessage } from '@/st/context';
+import { getContext, type STContext, type STMessage } from '@/st/context';
 import { reactive } from 'vue';
 import { deriveMemory, getLeaf, leafBodyOutdated, leafValid } from './apply';
 import { isAiFloor, pendingAiFloors } from './engine';
 import { latestStoryTime } from './timeTag';
+import {
+  invalidateMemorySession,
+  markMemorySessionLoaded,
+  markMemorySessionUnloaded,
+} from './session';
 import type { BaibaiMemory, LeafExtra, MemSummary, RawPrequel, StoredDelta, VarTemplate, VarTier } from './types';
 import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from './types';
 
@@ -114,34 +119,39 @@ export function recomputeDerived(): void {
 /* ============ 落盘:叶子在 chat 文件,森林在 metadata ============ */
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let flushContext: STContext | null = null;
 
 /** 防抖落盘叶子(写进 chat 文件)。合并连续多楼摘要为一次 saveChat。 */
 export function scheduleLeafFlush(): void {
   const ctx = getContext();
   if (!ctx?.saveChat) return;
+  flushContext = ctx;
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(() => {
     flushTimer = null;
-    void ctx.saveChat();
+    const target = flushContext;
+    flushContext = null;
+    void target?.saveChat().catch(error => console.error('[柏宝书] 叶子保存失败', error));
   }, 1500);
 }
 
 /** 立即落盘(切聊天/卸载前调用,避免丢未落盘叶子) */
-export function flushLeavesNow(): void {
+export function flushLeavesNow(context?: STContext | null): Promise<void> {
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
-  const ctx = getContext();
-  void ctx?.saveChat?.();
+  const target = context ?? flushContext ?? getContext();
+  flushContext = null;
+  return target?.saveChat?.() ?? Promise.resolve();
 }
 
 /**
  * 把森林(压缩节点)+ **仅 chat 层**变量模板写回 chat_metadata 并持久化。
  * 全局/角色层的模板不在这里(它们存 extension_settings,由 replaceVarsTemplate 落盘)。叶子也不在这里。
  */
-export function saveMemory() {
-  const ctx = getContext();
+export function saveMemory(context?: STContext | null) {
+  const ctx = context ?? getContext();
   if (!ctx?.chatMetadata) return;
   const snapshot: { version: number; summaries: MemSummary[]; varsTemplate: VarTemplate; rawPrequel?: RawPrequel } = {
     version: MEMORY_VERSION,
@@ -161,7 +171,7 @@ export function saveMemory() {
  * 需 chat 上下文;无 chat 时返回 null(延后,下次 CHAT_CHANGED 重跑)。
  * 搬不动的叶子(索引越界/消息已删)其 delta 合并进一条兜底叶子挂到最后 AI 楼,保结构化 1:1。
  */
-function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): BaibaiMemory | null {
+export function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): BaibaiMemory | null {
   if (!chat || chat.length === 0) return null; // 延后
 
   const out = createEmptyMemory();
@@ -169,6 +179,13 @@ function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): 
   const oldSums = (Array.isArray(raw.summaries) ? raw.summaries : []) as Array<Record<string, unknown>>;
 
   const orphanDeltas: StoredDelta[] = [];
+  const writes: Array<{ target: number; leaf: LeafExtra }> = [];
+  const occupied = new Set<number>();
+  const migratedIds = new Set(
+    chat
+      .map(message => getLeaf(message)?.id)
+      .filter((id): id is string => typeof id === 'string' && !!id),
+  );
 
   // 1) 旧叶子(level0)→ 搬到对应 AI 楼的 extra(保留原 id)
   for (const s of oldSums) {
@@ -192,43 +209,51 @@ function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): 
         }
       }
     }
-    if (target < 0 || !chat[target] || chat[target].extra?.bbs_leaf) {
+    const oldId = String(s.id);
+    if (migratedIds.has(oldId)) continue; // 上次 saveChat 成功但 metadata 升级前中断:可重入
+    if (target < 0 || !chat[target] || chat[target].extra?.bbs_leaf || occupied.has(target)) {
       orphanDeltas.push(delta); // 搬不动/目标已占用 → 兜底
       continue;
     }
     const leaf: LeafExtra = {
-      id: String(s.id),
+      id: oldId,
       text: String(s.text ?? ''),
       delta,
       timeLabel: s.timeLabel as string | undefined,
       createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
       v: 1,
     };
-    chat[target].extra = { ...(chat[target].extra ?? {}), bbs_leaf: leaf };
+    writes.push({ target, leaf });
+    occupied.add(target);
   }
 
   // 1b) 兜底叶子:把搬不动的 delta 合并挂到最后一条 AI 楼
   if (orphanDeltas.length) {
+    const fallbackId = 'leaf_migrate_v2_orphans';
+    if (migratedIds.has(fallbackId)) orphanDeltas.length = 0;
     let last = -1;
-    for (let i = chat.length - 1; i >= 0; i--) {
-      if (isAiFloor(chat[i])) {
+    for (let i = chat.length - 1; orphanDeltas.length && i >= 0; i--) {
+      if (isAiFloor(chat[i]) && !chat[i].extra?.bbs_leaf && !occupied.has(i)) {
         last = i;
         break;
       }
     }
-    if (last >= 0 && !chat[last].extra?.bbs_leaf) {
+    if (orphanDeltas.length && last < 0) {
+      throw new Error('v2→v3 迁移失败:存在无法挂靠的结构化状态，已保留旧版本数据供重试');
+    }
+    if (orphanDeltas.length && last >= 0) {
       const merged: StoredDelta = {};
       for (const d of orphanDeltas) mergeStoredDelta(merged, d);
-      chat[last].extra = {
-        ...(chat[last].extra ?? {}),
-        bbs_leaf: {
-          id: `leaf_migrate_${Date.now().toString(36)}`,
+      writes.push({
+        target: last,
+        leaf: {
+          id: fallbackId,
           text: '(迁移:历史结构化状态)',
           delta: merged,
           createdAt: Date.now(),
           v: 1,
         },
-      };
+      });
     }
   }
 
@@ -244,6 +269,10 @@ function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): 
       timeLabel: s.timeLabel as string | undefined,
       childIds: Array.isArray(s.childIds) ? (s.childIds as string[]) : [],
     });
+  }
+  // 全部落点验证完成后才修改 chat，避免迁移半途失败留下部分写入。
+  for (const { target, leaf } of writes) {
+    chat[target].extra = { ...(chat[target].extra ?? {}), bbs_leaf: leaf };
   }
   return out;
 }
@@ -335,13 +364,16 @@ function loadVarTemplates(rawChatTemplate: unknown): Record<VarTier, VarTemplate
 }
 
 /** 从当前聊天载入森林 + 三层变量模板 + 重算派生(必要时迁移) */
-export function loadMemory() {
+export async function loadMemory(): Promise<void> {
+  markMemorySessionUnloaded();
   const ctx = getContext();
   const meta = ctx?.chatMetadata as Record<string, unknown> | undefined;
   const raw = meta?.[MEMORY_KEY] as Record<string, unknown> | undefined;
   const chat = ctx?.chat ?? null;
+  const chatId = ctx?.getCurrentChatId?.() ?? '';
   // 变量模板与 summary 迁移正交:chat 层从 metadata 直读,再取全局/角色层(缺失=空模板)
   const varTemplates = loadVarTemplates(raw?.varsTemplate);
+  memory.rawPrequel = cleanRawPrequel(raw?.rawPrequel);
 
   if (raw && typeof raw === 'object') {
     const version = typeof raw.version === 'number' ? raw.version : 1;
@@ -352,8 +384,15 @@ export function loadMemory() {
       if (migrated) {
         assignForest(memory, migrated.summaries, varTemplates);
         // 先把叶子落盘(saveChat)成功,再升 version 写 metadata,保证可重入
-        flushLeavesNow();
-        saveMemory();
+        try {
+          await flushLeavesNow(ctx);
+        } catch (error) {
+          recomputeDerived();
+          throw new Error('v2→v3 迁移叶子保存失败，metadata 保持旧版本供下次重试', { cause: error });
+        }
+        const current = getContext();
+        if (current?.chat !== chat || current?.getCurrentChatId?.() !== chatId) return;
+        saveMemory(ctx);
       } else {
         // 延后迁移:暂用旧森林里的压缩节点(level≥1),叶子等下次 chat 就绪再搬
         const comps = (Array.isArray(raw.summaries) ? raw.summaries : []).filter(
@@ -365,8 +404,8 @@ export function loadMemory() {
   } else {
     assignForest(memory, [], varTemplates);
   }
-  memory.rawPrequel = cleanRawPrequel(raw?.rawPrequel);
   recomputeDerived();
+  markMemorySessionLoaded();
 }
 
 /**
@@ -398,10 +437,35 @@ export function replaceVarsTemplate(tier: VarTier, tpl: VarTemplate): void {
 export function bindChatLifecycle() {
   const ctx = getContext();
   if (!ctx?.eventSource || !ctx?.eventTypes) return;
-  ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED, () => {
-    flushLeavesNow();
-    loadMemory();
-  });
+  const globalKey = '__bbs_memory_lifecycle_cleanup__';
+  const globalState = globalThis as Record<string, unknown>;
+  const previousCleanup = globalState[globalKey];
+  if (typeof previousCleanup === 'function') previousCleanup();
+
+  const bindings: Array<{ event: string; handler: (...args: any[]) => void }> = [];
+  const bind = (event: string | undefined, handler: (...args: any[]) => void) => {
+    if (!event) return;
+    ctx.eventSource.on(event, handler);
+    bindings.push({ event, handler });
+  };
+  const reload = () => {
+    markMemorySessionUnloaded();
+    invalidateMemorySession();
+    void flushLeavesNow()
+      .catch(error => console.error('[柏宝书] 切换聊天前保存叶子失败', error))
+      .finally(() => {
+        void loadMemory().catch(error => console.error('[柏宝书] 载入聊天记忆失败', error));
+      });
+  };
+  bind(ctx.eventTypes.CHAT_CHANGED, reload);
+  bind(ctx.eventTypes.PERSONA_CHANGED, reload);
+  const cleanup = () => {
+    markMemorySessionUnloaded();
+    invalidateMemorySession();
+    for (const binding of bindings) ctx.eventSource.off?.(binding.event, binding.handler);
+    if (globalState[globalKey] === cleanup) delete globalState[globalKey];
+  };
+  globalState[globalKey] = cleanup;
   // 首次载入
-  loadMemory();
+  void loadMemory().catch(error => console.error('[柏宝书] 初次载入记忆失败', error));
 }

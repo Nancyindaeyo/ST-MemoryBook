@@ -1,17 +1,19 @@
 /**
  * 补充召回:前情原文抽段 + 可选的 LLM 选材(窗口外叶子)。
  * 与向量召回并列;任何失败只清空本槽,绝不阻断正文生成。
- * 不 import engine,避免和引擎的 CHAT_CHANGED 清理形成循环依赖。
+ * 保留窗口直接复用引擎口径，避免系统楼在两条召回链路里被算成不同结果。
  */
 
 import type { ChatMsg } from '@/api/client';
 import { mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
 import { apiSettings, engineActiveHere, getChannelForTask } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
+import { resolveKeepStart } from './engine';
 import { clearLlmPickInjection, writeLlmPickInjection } from './inject';
 import { extractJsonObject } from './json';
 import {
   buildLeafCatalog,
+  fitPrequelIndexesToBudget,
   parseOneBasedIndexes,
   pickPrequelByKeywords,
   splitPrequelChunks,
@@ -20,9 +22,11 @@ import {
 import { MEMORY_BRIEFING_END, MEMORY_BRIEFING_NOTE } from './prompts';
 import { derivedMeta, memory } from './store';
 import { normalizeRecallInjectionDepth } from './vector/depth';
+import { beginMemorySessionOperation, isStaleMemorySessionError } from './session';
 
 const CATALOG_CAP = 40;
 const TEXT_CAP = 280;
+const PREQUEL_TOKEN_BUDGET = 1200;
 
 function clamp(n: number, lo: number, hi: number, fallback: number): number {
   if (!Number.isFinite(n)) return fallback;
@@ -33,24 +37,8 @@ function pickDepth(): number {
   return normalizeRecallInjectionDepth(apiSettings.vector.recall.injectionDepth);
 }
 
-/** 近似滑动窗口起点,口径对齐 keepRecent(只数非用户、非番外、有正文的楼)。 */
-function approxKeepStart(chat: STMessage[]): number {
-  const keep = Math.max(0, apiSettings.keepRecent);
-  const aiIdx: number[] = [];
-  for (let i = 0; i < chat.length; i++) {
-    const m = chat[i];
-    if (!m || m.is_user || m.extra?.bbs_omit) continue;
-    if (typeof m.mes !== 'string' || !m.mes.trim()) continue;
-    aiIdx.push(i);
-  }
-  if (!aiIdx.length) return 0;
-  if (keep <= 0) return chat.length;
-  if (aiIdx.length <= keep) return 0;
-  return aiIdx[aiIdx.length - keep];
-}
-
 function windowLeafIds(chat: STMessage[]): Set<string> {
-  const keepStart = approxKeepStart(chat);
+  const keepStart = resolveKeepStart(chat);
   const ids = new Set<string>();
   for (const leaf of derivedMeta.leaves) {
     if (!leaf.stale && leaf.msgIndex >= keepStart) ids.add(leaf.id);
@@ -77,10 +65,10 @@ function recentHaystack(chat: STMessage[]): string {
   return bits.join('\n');
 }
 
-function resolveSender(): { send: (messages: ChatMsg[]) => Promise<string> } | null {
+function resolveSender(signal: AbortSignal): { send: (messages: ChatMsg[]) => Promise<string> } | null {
   const channel = getChannelForTask('summary');
-  if (channel) return { send: messages => requestCompletion(channel, messages) };
-  if (mainApiAvailable()) return { send: messages => requestViaMainApi(messages) };
+  if (channel) return { send: messages => requestCompletion(channel, messages, { signal }) };
+  if (mainApiAvailable()) return { send: messages => requestViaMainApi(messages, { signal }) };
   return null;
 }
 
@@ -138,9 +126,10 @@ async function askLlmPick(
   haystack: string,
   maxLeaves: number,
   maxPrequel: number,
+  signal: AbortSignal,
 ): Promise<{ leaves: LeafCatalogItem[]; prequel: number[] } | null> {
   if (!catalog.length && !chunks.length) return null;
-  const sender = resolveSender();
+  const sender = resolveSender(signal);
   if (!sender) return null;
   const raw = await sender.send([{ role: 'user', content: buildPickPrompt(haystack, catalog, chunks, maxLeaves, maxPrequel) }]);
   const d = extractJsonObject<{ c?: unknown; p?: unknown; leaves?: unknown; prequels?: unknown }>(raw);
@@ -158,11 +147,14 @@ async function askLlmPick(
  * 失败只清槽。
  */
 export async function runSupplementalRecall(): Promise<void> {
+  let operation: ReturnType<typeof beginMemorySessionOperation> | null = null;
   try {
     if (!engineActiveHere() || apiSettings.summaryOnlyMode) {
       clearLlmPickInjection();
       return;
     }
+    operation = beginMemorySessionOperation();
+    operation.assertCurrent();
     const ctx = getContext();
     const chat = ctx?.chat ?? [];
     const prequelText = memory.rawPrequel?.text?.trim() ?? '';
@@ -171,25 +163,36 @@ export async function runSupplementalRecall(): Promise<void> {
     const maxLeaves = clamp(cfg.maxLeaves, 1, 12, 4);
     const maxPrequel = clamp(cfg.maxPrequelChunks, 1, 8, 3);
     const haystack = recentHaystack(chat);
-    let prequelIdx = pickPrequelByKeywords(chunks, haystack, maxPrequel);
+    let prequelIdx = fitPrequelIndexesToBudget(
+      chunks,
+      pickPrequelByKeywords(chunks, haystack, maxPrequel),
+      PREQUEL_TOKEN_BUDGET,
+    );
     let pickedLeaves: LeafCatalogItem[] = [];
 
     if (cfg.enabled) {
       const catalog = buildLeafCatalog(derivedMeta.leaves, windowLeafIds(chat), CATALOG_CAP);
       try {
-        const llm = await askLlmPick(catalog, chunks, haystack, maxLeaves, maxPrequel);
+        const llm = await askLlmPick(catalog, chunks, haystack, maxLeaves, maxPrequel, operation.signal);
+        operation.assertCurrent();
         if (llm) {
           pickedLeaves = llm.leaves;
-          if (llm.prequel.length) prequelIdx = llm.prequel;
+          // 合法空数组表示模型明确判定“无相关前情”，不能回退到关键词误命中。
+          prequelIdx = fitPrequelIndexesToBudget(chunks, llm.prequel, PREQUEL_TOKEN_BUDGET);
         }
       } catch (e) {
+        if (isStaleMemorySessionError(e) || operation.signal.aborted) throw e;
         console.warn('[柏宝书] LLM 选材失败(保留关键词前情,放行生成):', e);
       }
     }
 
+    operation.assertCurrent();
     writeLlmPickInjection(composeInjection(pickedLeaves, chunks, prequelIdx), pickDepth());
   } catch (e) {
+    if (isStaleMemorySessionError(e) || operation?.signal.aborted) return;
     console.warn('[柏宝书] 选材召回失败(清空槽,放行生成):', e);
     clearLlmPickInjection();
+  } finally {
+    operation?.dispose();
   }
 }

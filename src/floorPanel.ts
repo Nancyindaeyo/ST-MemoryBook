@@ -25,7 +25,6 @@ let enabled = false;
 let observer: MutationObserver | null = null;
 let sharedSheet: CSSStyleSheet | null = null;
 let cssHref = '';
-const bound = new Set<string>(); // 已绑定的事件名(幂等)
 
 // 共享刷新信号:任何会改变楼层叶子/番外态的事件都 +1,组件据此重读 chat。
 const signal = reactive({ tick: 0 });
@@ -38,6 +37,14 @@ interface Mounted {
   app: App;
 }
 const mountedByFloor = new Map<number, Mounted>();
+const eventBindings: Array<{
+  source: NonNullable<ReturnType<typeof getContext>>['eventSource'];
+  event: string;
+  handler: (...args: any[]) => void;
+}> = [];
+let eventsBound = false;
+let stopSettingsWatch: (() => void) | null = null;
+let floorPanelCleanup: (() => void) | null = null;
 
 /* ============ 共享样式表 ============ */
 
@@ -174,6 +181,7 @@ function onRendered(idx: unknown): void {
   if (!activeNow()) return;
   const i = Number(idx);
   setTimeout(() => {
+    if (!activeNow()) return;
     if (Number.isFinite(i)) injectFloor(i);
     scanMissing(); // 兜底补漏
     bumpTick(); // 摘要可能刚生成,通知已挂组件重读
@@ -184,6 +192,7 @@ function onSwiped(idx: unknown): void {
   if (!activeNow()) return;
   const i = Number(idx);
   setTimeout(() => {
+    if (!activeNow()) return;
     if (!Number.isFinite(i)) return;
     // 翻页:叶子可能失效/换页,组件重读即可(host 不必重建)
     if (!mountedByFloor.has(i)) injectFloor(i);
@@ -192,14 +201,15 @@ function onSwiped(idx: unknown): void {
 }
 
 function bindEvents(): void {
+  if (eventsBound) return;
   const ctx = getContext();
   const es = ctx?.eventSource;
   const et = ctx?.eventTypes;
   if (!es || !et) return;
-  const on = (name: string | undefined, fn: (...a: unknown[]) => void) => {
-    if (!name || bound.has(name)) return;
+  const on = (name: string | undefined, fn: (...a: any[]) => void) => {
+    if (!name) return;
     es.on(name, fn);
-    bound.add(name);
+    eventBindings.push({ source: es, event: name, handler: fn });
   };
   on(et.CHARACTER_MESSAGE_RENDERED, onRendered);
   on(et.USER_MESSAGE_RENDERED, () => activeNow() && setTimeout(scanMissing, 50));
@@ -209,6 +219,7 @@ function bindEvents(): void {
   on(et.MESSAGE_EDITED, () => activeNow() && setTimeout(bumpTick, 50));
   on(et.CHAT_CHANGED, () => setTimeout(rebuildAll, 80));
   if (et.MORE_MESSAGES_LOADED) on(et.MORE_MESSAGES_LOADED, () => activeNow() && setTimeout(scanMissing, 50));
+  eventsBound = true;
 }
 
 /** 盯聊天区:ST 重渲消息时补挂被冲掉的 host。防抖避免流式生成期高频触发。 */
@@ -263,9 +274,33 @@ export function syncFloorPanel(on: boolean): void {
 
 /** 启动链调用一次:开关跟随(设置项 apiSettings.ui.showFloorPanel)。主题由组件内 ui.theme 响应式绑定。 */
 export function bindFloorPanel(): void {
-  watch(
+  const globalKey = '__bbs_floor_panel_cleanup__';
+  const globalState = globalThis as Record<string, unknown>;
+  const previousCleanup = globalState[globalKey];
+  if (typeof previousCleanup === 'function') previousCleanup();
+  stopSettingsWatch?.();
+  stopSettingsWatch = watch(
     () => apiSettings.ui.showFloorPanel,
     v => syncFloorPanel(!!v),
     { immediate: true },
   );
+  const cleanup = () => {
+    enabled = false;
+    stopObserver();
+    rebuildAll();
+    for (const binding of eventBindings.splice(0)) {
+      binding.source.off?.(binding.event, binding.handler);
+    }
+    eventsBound = false;
+    stopSettingsWatch?.();
+    stopSettingsWatch = null;
+    if (floorPanelCleanup === cleanup) floorPanelCleanup = null;
+    if (globalState[globalKey] === cleanup) delete globalState[globalKey];
+  };
+  floorPanelCleanup = cleanup;
+  globalState[globalKey] = cleanup;
+}
+
+export function unbindFloorPanel(): void {
+  floorPanelCleanup?.();
 }
