@@ -160,6 +160,19 @@ export interface MemScene {
   updatedAt: number;
 }
 
+/** 五档定性标记,不是可累加的分数。 */
+export type NpcAffinityLevel = -2 | -1 | 0 | 1 | 2;
+
+/** 对主角的内心好感与外在态度估计。省略=保持;null=明确恢复未知,与中性(0)不同。 */
+export interface NpcAffinity {
+  /** 真实好恶/亲近倾向,不是爱情、信任或服从度。 */
+  affinityInner?: NpcAffinityLevel | null;
+  /** 相对稳定的对外态度,不是本轮语气或心情。 */
+  affinityOuter?: NpcAffinityLevel | null;
+  /** 一句依据/表现/矛盾说明;同档默认沿用,空字符串=明确清空。 */
+  affinityNote?: string;
+}
+
 /**
  * NPC / 角色(派生产物,不持久化)。
  * 与物品(MemItem)同构:确定性 id `npc:${规范化名}`,重放幂等、手动 op 可稳定引用。
@@ -174,7 +187,7 @@ export interface MemScene {
  *    即时层之所以不违反「只记长期重要信息」铁律,正因它压根不进历史——和当前时间/地点同性质。
  * important=true 的「主要角色」:永远全量注入(跳过在场判定),界面/注入弱化档案、突出即时状态面板。
  */
-export interface MemNpc {
+export interface MemNpc extends NpcAffinity {
   id: string;
   /** 名字(同时作为匹配键) */
   name: string;
@@ -410,14 +423,16 @@ export interface SceneFocus {
 }
 
 /**
- * 生活小档案一条:主角的偏好/习惯/近期个人状态(如「不吃香菜」「在赶项目死线」)。
- * 铁律:只记主角明说过/正文明确揭示的,禁止从行为推断。
+ * 生活小档案一条:主角或主要角色的偏好/习惯/近期个人状态。
+ * 铁律:归属明确,只记本人明说过/正文明确揭示的,禁止从单次行为推断。
  * 三投放层(注入选择,不动真源):pinned 置顶常驻(≤5) / active 时效内相关才注入 / archive 沉降仅关键词触发。
  */
 export interface MemLifeDetail {
   /** 稳定 id:detail:${leafId}#${add序号}(重放幂等、手动 op 可稳定引用) */
   id: string;
-  /** 细节正文一句话 */
+  /** 所属人物:user 为主角,其他值为 NPC 名册中的名字;旧数据省略视为 user。 */
+  subject?: string;
+  /** 细节正文一句话(主语由 subject 单独表示) */
   text: string;
   /** 主题标签(1-3 个,触发匹配用,如「饮食」「作息」) */
   topics: string[];
@@ -434,6 +449,8 @@ export interface MemLifeDetail {
 
 /** AI 侧新增生活细节(tier 由代码定为 active,置顶仅手动) */
 export interface LifeDetailAdd {
+  /** user 为主角,其他值为角色名;旧格式省略仍按主角处理。 */
+  subject?: string;
   text: string;
   topics?: string[];
   anchors?: string[];
@@ -443,6 +460,8 @@ export interface LifeDetailAdd {
 /** AI 侧更新生活细节(id 可为短序号 d1/d2,finalize 时翻成稳定 id) */
 export interface LifeDetailUpdate {
   id: string;
+  /** 省略保持归属;明确纠正人物时才填,user 表示改回主角。 */
+  subject?: string;
   text?: string;
   topics?: string[];
   anchors?: string[];
@@ -476,7 +495,7 @@ export interface BaibaiMemory {
   npcs: MemNpc[];
   /** 派生缓存:近期物品变动日志(重放时产出,只留最近若干条) */
   itemLog: ItemLogEntry[];
-  /** 派生缓存:主角生活小档案(从叶子 delta 重放) */
+  /** 派生缓存:主角及角色生活小档案(从叶子 delta 重放) */
   lifeDetails: MemLifeDetail[];
   /** 真源镜像:三层变量定义模板(global/char 来自 settings,chat 来自 chatMetadata) */
   varTemplates: Record<VarTier, VarTemplate>;
@@ -520,7 +539,7 @@ export interface ItemDelta {
 }
 
 /** NPC 指令里单个角色的形状(AI / 手动共用) */
-export interface NpcDelta {
+export interface NpcDelta extends NpcAffinity {
   name: string;
   /** 性别(档案层,短值;所有分档都注入) */
   gender?: string;
@@ -667,7 +686,7 @@ export interface SummaryDelta {
     /** 按提示词里展示的短 id(p1/p2…)了结,每项带 outcome/reason 说明怎么了结;裸字符串兼容旧格式 */
     resolve?: PlanResolveItem[];
   };
-  /** 指令型:生活小档案增删改(可选;只记主角明说过/明文揭示的) */
+  /** 指令型:生活小档案增删改(可选;只记主角或主要角色归属明确、明说过/明文揭示的) */
   lifeDetails?: {
     add?: LifeDetailAdd[];
     update?: LifeDetailUpdate[];

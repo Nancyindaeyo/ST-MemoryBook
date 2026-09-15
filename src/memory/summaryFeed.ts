@@ -3,16 +3,29 @@
  * 这里只决定哪些楼的正文进入 summary/resummary 提示词。
  */
 
-export function filterSummaryFeedIndices<T extends { is_user?: boolean }>(
+export function filterSummaryFeedIndices<T extends {
+  is_user?: boolean;
+  is_system?: boolean;
+  extra?: { type?: string; bbs_hidden?: boolean };
+}>(
   chat: T[],
   indices: number[],
   aiOnly: boolean,
 ): number[] {
   if (!aiOnly) return indices;
-  return indices.filter(i => {
-    const message = chat[i];
-    return !!message && message.is_user !== true;
-  });
+  return indices.filter(i => isSummaryAiOutput(chat[i]));
+}
+
+/** 只总结 AI 输出时排除用户楼、旁白/系统楼;被隐藏的旧 AI 楼仍算正文。 */
+function isSummaryAiOutput(message: {
+  is_user?: boolean;
+  is_system?: boolean;
+  extra?: { type?: string; bbs_hidden?: boolean };
+} | undefined): boolean {
+  if (!message || message.is_user === true) return false;
+  if (message.extra?.bbs_hidden) return true;
+  if (message.is_system && message.extra?.type) return false;
+  return true;
 }
 
 export function summaryFeedNote(aiOnly: boolean): string {

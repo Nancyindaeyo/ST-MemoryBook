@@ -89,6 +89,7 @@ console.log(snapshot.plans);
 console.log(snapshot.scenes);
 console.log(snapshot.npcs);
 console.log(snapshot.itemLog);
+console.log(snapshot.lifeDetails);
 ```
 
 主要返回结构：
@@ -127,8 +128,28 @@ console.log(snapshot.itemLog);
   scenes: [],
   npcs: [],
   itemLog: [],
+  lifeDetails: [],
 }
 ```
+
+`snapshot.npcs` 中每个角色可带独立的内心好感与外在态度估计（不是自定义变量，也不是可加减的分数）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `affinityInner` | 内心好感（对 user）：`-2` 强烈反感、`-1` 不喜欢、`0` 无明显好恶、`1` 有好感、`2` 感情深厚 |
+| `affinityOuter` | 外在态度（对 user）：`-2` 明显敌对、`-1` 冷淡疏远、`0` 不明显亲近或排斥、`1` 友善亲近、`2` 明显亲近、积极表达 |
+| `affinityNote` | 一句依据、表现或矛盾说明 |
+
+两侧都可能缺失或为 `null`，表示未知，不能按 `0` 处理。楼层 delta 中省略字段表示保持，`null` 表示撤回该侧估计，`affinityNote: ""` 表示清空说明。估计不等于已证实的心理事实，也不代表爱情、信任、服从或同意。
+
+`snapshot.lifeDetails` 为按人物记录的生活小档案。`subject: "user"` 表示主角，其他字符串为角色在 NPC 名册中的名字；旧叶子缺少 `subject` 时按原有主角专用语义处理，不从正文猜人物。`text` 是该人物的细节正文，显示或注入时会加上姓名。相同内容按人物分别去重，不能跨人合并。
+
+```js
+{ subject: "user", text: "认为煎饼果子不加脆饼就没有灵魂", topics: ["饮食"], anchors: ["煎饼果子"], tier: "active" }
+{ subject: "艾琳", text: "喝茶不加糖", topics: ["饮食"], anchors: ["茶"], tier: "active" }
+```
+
+楼层 `lifeDetails.update` 省略 `subject` 保持原人物，显式写 `"user"` 可纠正回主角；自动记录限主角与主要角色的明确事实。手动 NPC 改名同步生活条目的归属，删除角色不会删除其历史生活档案。置顶/关键词触发/时效及沉降规则不变，换对话也会保留归属。
 
 读取某楼之前或之后的状态：
 

@@ -13,12 +13,14 @@ import { clearLlmPickInjection, writeLlmPickInjection } from './inject';
 import { extractJsonObject } from './json';
 import {
   buildLeafCatalog,
+  CATALOG_PREVIEW_CHARS,
   fitPrequelIndexesToBudget,
   parseOneBasedIndexes,
   pickPrequelByKeywords,
   splitPrequelChunks,
   type LeafCatalogItem,
 } from './prequel';
+import { npcNameList } from './npcIdentity';
 import { MEMORY_BRIEFING_END, MEMORY_BRIEFING_NOTE } from './prompts';
 import { derivedMeta, memory } from './store';
 import { normalizeRecallInjectionDepth } from './vector/depth';
@@ -47,22 +49,24 @@ function windowLeafIds(chat: STMessage[]): Set<string> {
 }
 
 function recentHaystack(chat: STMessage[]): string {
-  const bits: string[] = [];
-  if (memory.state.time) bits.push(memory.state.time);
-  if (memory.state.location) bits.push(memory.state.location);
-  if (memory.state.sceneFocus?.situation) bits.push(memory.state.sceneFocus.situation);
-  for (const n of memory.npcs) {
-    bits.push(n.name);
-    if (n.aliases?.length) bits.push(n.aliases.join(' '));
-  }
+  const recent: string[] = [];
   for (let i = chat.length - 1, seen = 0; i >= 0 && seen < 4; i--) {
     const m = chat[i];
     const text = typeof m?.mes === 'string' ? m.mes.replace(/\s+/g, ' ').trim() : '';
     if (!text || m?.extra?.bbs_omit) continue;
-    bits.push(text.slice(0, 240));
+    recent.push(text.slice(0, 240));
     seen++;
   }
-  return bits.join('\n');
+  const hay = recent.join('\n');
+  const extra: string[] = [];
+  if (memory.state.time) extra.push(memory.state.time);
+  if (memory.state.location) extra.push(memory.state.location);
+  if (memory.state.sceneFocus?.situation) extra.push(memory.state.sceneFocus.situation);
+  for (const n of memory.npcs) {
+    const names = npcNameList(n);
+    if (names.some(name => hay.includes(name))) extra.push(names.join(' '));
+  }
+  return [hay, ...extra].filter(Boolean).join('\n');
 }
 
 function resolveSender(signal: AbortSignal): { send: (messages: ChatMsg[]) => Promise<string> } | null {
@@ -107,7 +111,7 @@ function buildPickPrompt(
   const cat = catalog.map((item, i) => {
     const where = item.floor != null ? `#${item.floor}` : '';
     const when = item.time ? ` ${item.time}` : '';
-    return `C${i + 1} ${where}${when} ${item.text}`.replace(/\s+/g, ' ').trim();
+    return `C${i + 1} ${where}${when} ${clip(item.text, CATALOG_PREVIEW_CHARS)}`.replace(/\s+/g, ' ').trim();
   }).join('\n');
   const pre = chunks.map((c, i) => `P${i + 1} ${clip(c, 220)}`).join('\n');
   return [

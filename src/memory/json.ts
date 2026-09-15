@@ -62,8 +62,14 @@ function escapeStrayQuotes(s: string): string {
 function stripThinkAndFence(raw: string): string {
   let s = raw.trim();
 
+  // 未闭合的检查块通常是输出被截断，不能把其中半成品 JSON 当最终结果。
+  if (/^<think(?:ing)?\b/i.test(s) && !/<\/think(?:ing)?>/i.test(s)) return '';
+
   // 去掉 <think>…</think> / <thinking>…</thinking> 思维链(大小写不敏感)
   s = s.replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
+
+  // 前面可能已有一个完整检查块，后面又开启了被截断的新块。
+  if (/<think(?:ing)?\b/i.test(s)) return '';
 
   // assistant prefill 场景下,返回可能只包含续写的思维链正文 + </thinking> + JSON,
   // 没有开头 <thinking>。此时丢弃最后一个闭合标签及其之前的全部文本。

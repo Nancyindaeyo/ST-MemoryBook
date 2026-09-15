@@ -63,3 +63,25 @@ export function filterItemsForBudget(
 export function budgetTiersToTry(budgetTokens: number): InjectBudgetTier[] {
   return budgetTokens > 0 ? ['full', 'tight', 'core'] : ['full'];
 }
+
+/**
+ * 分档裁剪后仍超预算时硬截断。suffix 应含收尾标记,保证截断后提示词结构完整。
+ */
+export function clipTextToTokenBudget(text: string, budget: number, suffix = ''): string {
+  if (budget <= 0) return text;
+  if (estimateUtf8Tokens(text) <= budget) return text;
+  let lo = 0;
+  let hi = text.length;
+  let best = suffix;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const candidate = `${text.slice(0, mid).trimEnd()}${suffix}`;
+    if (estimateUtf8Tokens(candidate) <= budget) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}

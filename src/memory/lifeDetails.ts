@@ -15,6 +15,23 @@ export function normalizeLifeDetailText(text: string): string {
   return text.trim().toLowerCase().replace(/[，。！？!?、；;：:\s]+$/u, '');
 }
 
+/** 旧档案原本仅记录主角;缺主语时沿用旧语义,不从正文猜角色。 */
+export function lifeDetailSubject(detail: { subject?: string }): string {
+  return detail.subject?.trim() || 'user';
+}
+
+/** 同一句偏好属于不同人物时必须各自保留。 */
+export function sameLifeDetail(a: { subject?: string; text: string }, b: { subject?: string; text: string }): boolean {
+  return lifeDetailSubject(a).toLowerCase() === lifeDetailSubject(b).toLowerCase()
+    && normalizeLifeDetailText(a.text) === normalizeLifeDetailText(b.text);
+}
+
+/** 页面/副 API/主模型注入共用:每一条都明确标出是谁的,不依赖段落标题猜主语。 */
+export function fmtLifeDetail(detail: { subject?: string; text: string }, userName = '主角'): string {
+  const subject = lifeDetailSubject(detail);
+  return `${subject === 'user' ? userName : subject}：${detail.text}`;
+}
+
 function upsertUpdate(out: LifeDetailsDelta, update: LifeDetailUpdate): void {
   const updates = (out.update ??= []);
   const index = updates.findIndex(existing => existing.id === update.id);
@@ -30,17 +47,17 @@ function sameLeafAddIndex(id: string, leafId?: string): number | null {
   return Number.isInteger(index) && index >= 0 ? index : null;
 }
 
-function effectiveRemovedText(
+function effectiveRemovedDetail(
   out: LifeDetailsDelta,
   id: string,
   options: MergeLifeDetailsOptions,
-): string | undefined {
+): LifeDetailAdd | undefined {
   const sameLeafIndex = sameLeafAddIndex(id, options.leafId);
   const base = sameLeafIndex === null
-    ? options.existingDetails?.find(detail => detail.id === id)?.text
-    : out.add?.[sameLeafIndex]?.text;
+    ? options.existingDetails?.find(detail => detail.id === id)
+    : out.add?.[sameLeafIndex];
   const update = out.update?.find(entry => entry.id === id);
-  return update?.text ?? base;
+  return base ? { ...base, ...update } : undefined;
 }
 
 function reviveRemovedDetail(
@@ -48,10 +65,9 @@ function reviveRemovedDetail(
   add: LifeDetailAdd,
   options: MergeLifeDetailsOptions,
 ): boolean {
-  const normalized = normalizeLifeDetailText(add.text);
   const id = out.remove?.find(removedId => {
-    const text = effectiveRemovedText(out, removedId, options);
-    return !!text && normalizeLifeDetailText(text) === normalized;
+    const detail = effectiveRemovedDetail(out, removedId, options);
+    return !!detail && sameLifeDetail(detail, add);
   });
   if (!id) return false;
 
@@ -73,6 +89,7 @@ function reviveRemovedDetail(
     upsertUpdate(out, {
       id,
       text: add.text,
+      ...(add.subject ? { subject: add.subject } : {}),
       topics: add.topics ?? [],
       anchors: add.anchors ?? [],
       until: add.until ?? '',

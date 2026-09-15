@@ -3,10 +3,23 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
-async function importStandalone(relativePath) {
-  const sourceUrl = new URL(relativePath, import.meta.url);
+const compiledModules = new Map();
+
+async function compileToDataUrl(sourceUrl) {
   const sourcePath = fileURLToPath(sourceUrl);
-  const source = await readFile(sourceUrl, 'utf8');
+  const cached = compiledModules.get(sourcePath);
+  if (cached) return cached;
+  let source = await readFile(sourceUrl, 'utf8');
+  const specs = [...new Set([...source.matchAll(/(?:^|\n)import\s+(?!type\b)[\s\S]*?from\s+['"](\.[^'"]+)['"]/g)].map(m => m[1]))];
+  const resolved = new Map();
+  for (const spec of specs) {
+    const dep = spec.replace(/\.js$/, '.ts');
+    const depUrl = new URL(dep.endsWith('.ts') ? dep : `${dep}.ts`, sourceUrl);
+    resolved.set(spec, await compileToDataUrl(depUrl));
+  }
+  source = source.replace(/(from\s+)['"](\.[^'"]+)['"]/g, (full, prefix, spec) => (
+    resolved.has(spec) ? `${prefix}${JSON.stringify(resolved.get(spec))}` : full
+  ));
   const transpiled = ts.transpileModule(source, {
     fileName: sourcePath,
     reportDiagnostics: true,
@@ -27,7 +40,12 @@ async function importStandalone(relativePath) {
     throw new Error(ts.formatDiagnosticsWithColorAndContext(compileErrors, host));
   }
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled.outputText).toString('base64')}`;
-  return import(moduleUrl);
+  compiledModules.set(sourcePath, moduleUrl);
+  return moduleUrl;
+}
+
+async function importStandalone(relativePath) {
+  return import(await compileToDataUrl(new URL(relativePath, import.meta.url)));
 }
 
 let assertions = 0;
@@ -320,6 +338,15 @@ const feedChat = [
 ];
 deepEqual(filterSummaryFeedIndices(feedChat, [0, 1, 2], false), [0, 1, 2], '默认摘要正文应包含 user 楼');
 deepEqual(filterSummaryFeedIndices(feedChat, [0, 1, 2], true), [1], '只总结 AI 输出时应去掉 user 楼');
+deepEqual(
+  filterSummaryFeedIndices(
+    [...feedChat, { is_user: false, is_system: true, extra: { type: 'narrator' }, mes: '旁白' }],
+    [0, 1, 2, 3],
+    true,
+  ),
+  [1],
+  '只总结 AI 输出时应去掉旁白/系统楼',
+);
 equal(summaryFeedNote(true).includes('只含 AI 输出'), true, '只总结 AI 输出时应给模型说明');
 equal(summaryFeedNote(false), '', '默认不应附加摘要正文说明');
 
@@ -406,6 +433,7 @@ equal(
 const { cleanExactQuotes, quoteInSource, collectHiddenQuotes, fmtExactQuotes } = await importStandalone('../src/memory/quotes.ts');
 equal(quoteInSource('雨落三声', '他把暗号说成雨落三声。'), true, '原句应能在正文中命中');
 equal(quoteInSource('正文没有的句', '他把暗号说成雨落三声。'), false, '编造原句不得入库');
+equal(quoteInSource('<fake>雨落三声', '他把暗号说成雨落三声。'), false, '带假标签的编造原句不得入库');
 deepEqual(
   cleanExactQuotes(
     [{ text: '雨落三声', why: '暗号' }, { text: '编造的', why: '假' }, '雨落三声'],

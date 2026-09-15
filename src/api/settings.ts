@@ -171,7 +171,7 @@ export type Verbosity = 'detailed' | 'concise';
 export interface InjectionSections {
   /** 眼下局势(sceneFocus 互动局势卡) */
   sceneFocus: boolean;
-  /** 主角生活细节(仅控制注入;记录始终开启,无开关——不注入时记多少都不影响正文) */
+  /** 主角及主要角色的生活细节(仅控制注入;记录始终开启,无开关——不注入时记多少都不影响正文) */
   lifeDetails: boolean;
   /** 主角当前状态(性别/年龄/外貌/着装/状态) */
   protagonist: boolean;

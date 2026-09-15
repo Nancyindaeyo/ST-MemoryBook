@@ -233,15 +233,13 @@ function startObserver(): void {
     obTimer = setTimeout(() => {
       obTimer = null;
       if (!activeNow()) return;
-      scanMissing();
-      // 校正:host 已从 DOM 脱离(被 ST 重建)但仍在表里 → 卸掉,清标记待补挂
-      for (const [idx, m] of mountedByFloor) {
-        if (!m.host.isConnected) {
-          m.app.unmount();
-          mountedByFloor.delete(idx);
-          mesEl(idx)?.removeAttribute(MARK_ATTR);
-        }
+      // 必须先卸已脱离的旧 host:若先补挂,后续按 mesid 清 MARK_ATTR 会把刚挂上的新面板标成未挂。
+      for (const [idx, m] of [...mountedByFloor]) {
+        if (m.host.isConnected) continue;
+        m.app.unmount();
+        mountedByFloor.delete(idx);
       }
+      scanMissing();
     }, 200);
   });
   observer.observe(chatEl, { childList: true, subtree: true });

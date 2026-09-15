@@ -65,7 +65,7 @@ export interface PublicSnapshot {
   scenes: MemScene[];
   npcs: MemNpc[];
   itemLog: ItemLogEntry[];
-  /** 主角生活小档案(三投放层:pinned 常驻 / active 时效 / archive 触发) */
+  /** 主角及主要角色的生活小档案(三投放层:pinned 常驻 / active 时效 / archive 触发) */
   lifeDetails: MemLifeDetail[];
 }
 

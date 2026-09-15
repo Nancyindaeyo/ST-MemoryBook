@@ -910,7 +910,7 @@ function exportPublicApiDocument() {
             <BbsSelect v-model="apiSettings.assignments.resummary" :options="channelOptions" class="bbs-assign-select" aria-label="总结使用的渠道" />
           </div>
         </div>
-        <p class="bbs-field-hint">不指派渠道时跟随主 API:直接借用你主界面当前正在用的 API(聊天补全/文本补全)执行摘要,无需额外配置。想用不同模型再在下方建副渠道指派。</p>
+        <p class="bbs-field-hint">推荐使用DeepSeek或豆包，不推荐Gemini，甲太厚</p>
 
         <hr class="bbs-rule" />
 
@@ -1019,7 +1019,7 @@ function exportPublicApiDocument() {
           <span class="bbs-field-label">生活档案</span>
           <input v-model="apiSettings.injection.lifeDetails" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">主角生活细节的注入开关。记录始终开启(AI 照常积累档案,可在角色页管理);关闭后只是不再发给主模型,重开即可恢复注入。</p>
+        <p class="bbs-field-hint">控制主角及主要角色生活档案的注入。记录始终开启(AI 照常积累档案,可在角色页管理);关闭后只是不再发给主模型,重开即可恢复注入。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">主角信息</span>

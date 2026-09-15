@@ -17,7 +17,8 @@ function oneLine(v: unknown, max: number): string {
 }
 
 function compact(s: string): string {
-  return s.replace(/<[^>]+>/g, '').replace(/\s+/g, '');
+  // 只压空白:不能剥标签,否则模型编造的 <fake>口令 会被当成正文口令通过。
+  return s.replace(/\s+/g, '');
 }
 
 /** 原句必须能在本楼正文里找到,防止模型改写或编造。 */

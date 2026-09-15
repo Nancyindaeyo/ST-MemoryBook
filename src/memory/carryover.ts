@@ -20,6 +20,7 @@ import { deriveMemory, makeLeafId } from './apply';
 import { resolveKeepStart } from './engine';
 import { refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { latestStoryTime } from './timeTag';
+import { waitForMemorySessionLoaded } from './session';
 import { memory, recomputeDerived, saveMemory, flushLeavesNow } from './store';
 import type { JsonValue, LeafExtra, MemSummary, StoredDelta } from './types';
 import { isBaiBaoKuAvailable, vecBundleCreate } from '@/api/baibaoku';
@@ -110,6 +111,7 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
   if (state.lifeDetails.length) {
     delta.lifeDetails = {
       add: state.lifeDetails.map(d => ({
+        subject: d.subject,
         text: d.text,
         topics: [...d.topics],
         anchors: [...d.anchors],
@@ -152,6 +154,9 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
         age: n.age,
         ageTime: n.ageTime,
         relation: n.relation,
+        affinityInner: n.affinityInner,
+        affinityOuter: n.affinityOuter,
+        affinityNote: n.affinityNote,
         ties: n.ties,
         title: n.title,
         desc: n.desc,
@@ -183,12 +188,20 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
 }
 
 /** 深拷贝一条要搬运的消息,取消隐藏、保留叶子。 */
-function sanitizeCarryMessage(m: STMessage): STMessage {
+function sanitizeCarryMessage(m: STMessage, detailIds: ReadonlyMap<string, string>): STMessage {
   const clone: STMessage = JSON.parse(JSON.stringify(m));
   clone.is_system = false;
   if (clone.extra && 'bbs_hidden' in clone.extra) {
     const { bbs_hidden: _h, ...rest } = clone.extra;
     clone.extra = rest;
+  }
+  // 窗口前的生活条目已改挂种子叶:同步窗口内引用,否则纠正归属/修改/沉降/删除会失效。
+  const life = clone.extra?.bbs_leaf?.delta.lifeDetails;
+  if (life) {
+    for (const update of life.update ?? []) update.id = detailIds.get(update.id) ?? update.id;
+    for (const key of ['archive', 'remove'] as const) {
+      if (life[key]) life[key] = life[key].map(id => detailIds.get(id) ?? id);
+    }
   }
   return clone;
 }
@@ -257,6 +270,7 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
   // 种子叶 id 先生成:生活细节的稳定 id 由「叶子id#序号」派生,编码 delta 时就要用
   const seedLeafId = makeLeafId();
   const seedDelta = encodeStateAsDelta(stateBefore, seedLeafId);
+  const detailIds = new Map(stateBefore.lifeDetails.map((d, i) => [d.id, `detail:${seedLeafId}#${i}`]));
 
   // 合并历史摘要(窗口之前的剧情) = 种子叶子 text
   const mergedSummary = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, sourceChat, carryStart));
@@ -270,7 +284,7 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     const m = sourceChat[i];
     if (!m) continue;
     if (m.is_system && m.extra?.type) continue; // 原生系统楼不搬
-    carryMessages.push(sanitizeCarryMessage(m));
+    carryMessages.push(sanitizeCarryMessage(m, detailIds));
   }
 
   if (!mergedSummary && !carryMessages.length && !deltaHasData(seedDelta)) {
@@ -298,6 +312,12 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     await doNewChat({ deleteCurrentChat: false });
   } catch (e) {
     toast(`创建新对话失败:${e instanceof Error ? e.message : String(e)}`, 'error');
+    return false;
+  }
+
+  // CHAT_CHANGED 会异步重载空聊天;必须等载入完成后再写种子,否则 loadMemory 会盖掉刚写入的摘要森林。
+  if (!(await waitForMemorySessionLoaded(8000))) {
+    toast('新对话记忆尚未就绪,请稍后重试带数据创建', 'error');
     return false;
   }
 

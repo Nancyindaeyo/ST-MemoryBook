@@ -11,7 +11,7 @@ export interface LeafCatalogItem {
 }
 
 const DEFAULT_CHUNK = 420;
-const CATALOG_TEXT = 96;
+export const CATALOG_PREVIEW_CHARS = 96;
 
 function clampInt(n: number, lo: number, hi: number, fallback: number): number {
   if (!Number.isFinite(n)) return fallback;
@@ -144,7 +144,8 @@ export function buildLeafCatalog(
     seen.add(leaf.id);
     items.push({
       id: leaf.id,
-      text: text.length > CATALOG_TEXT ? `${text.slice(0, CATALOG_TEXT)}…` : text,
+      // 目录全文留给注入;选题提示词另行截预览,避免 96 字预览把召回正文裁掉。
+      text,
       time: leaf.timeStart || leaf.timeLabel,
       floor: leaf.msgIndex,
     });

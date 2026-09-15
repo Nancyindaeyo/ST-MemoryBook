@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fitPrequelIndexesToBudget } from './prequel';
+import { buildLeafCatalog, CATALOG_PREVIEW_CHARS, fitPrequelIndexesToBudget } from './prequel';
 import { stripConfiguredTagBlocks } from './tagSanitizer';
 
 describe('memory content processing', () => {
@@ -18,5 +18,16 @@ describe('memory content processing', () => {
     const chunks = ['第一段短文', '第二段也不长', '第三段'];
     expect(fitPrequelIndexesToBudget(chunks, [2, 0, 1], 80)).toEqual([0, 1, 2]);
     expect(fitPrequelIndexesToBudget(chunks, [1, 0, 2], 20)).toEqual([1]);
+  });
+
+  it('叶子目录保留全文,选题预览另截', () => {
+    const long = '旧记忆正文'.repeat(40);
+    const catalog = buildLeafCatalog(
+      [{ id: 'leaf-1', text: long, msgIndex: 12, quotes: [{ text: '口令赤鸢' }] }],
+      new Set(),
+    );
+    expect(catalog[0].text).toContain(long);
+    expect(catalog[0].text).toContain('口令赤鸢');
+    expect(catalog[0].text.length).toBeGreaterThan(CATALOG_PREVIEW_CHARS);
   });
 });

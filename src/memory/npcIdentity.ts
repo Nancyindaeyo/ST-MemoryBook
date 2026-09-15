@@ -4,6 +4,7 @@
  */
 
 import type { KnowledgeScope, MemNpc, NpcDelta, NpcMerge } from './types';
+import { applyNpcAffinity } from './npcRelations';
 
 function isLocked(locked: string[] | undefined, field: string): boolean {
   return !!locked?.includes(field);
@@ -77,6 +78,23 @@ export function findNpc<T extends NpcIdentity>(npcs: T[], name: string): T | und
   return npcs.find(n => normNpcName(n.name) === key || (n.aliases ?? []).some(alias => normNpcName(alias) === key));
 }
 
+/** 同叶先 update 后 merge 时,改名后的补丁仍写在新名上,回溯到尚未改名的原记录。 */
+function findNpcViaPendingMerges(npcs: MemNpc[], name: string, merges: NpcMerge[]): MemNpc | undefined {
+  const seen = new Set<string>();
+  let current = name.trim();
+  while (current) {
+    const key = normNpcName(current);
+    if (!key || seen.has(key)) return undefined;
+    seen.add(key);
+    const hit = findNpc(npcs, current);
+    if (hit) return hit;
+    const step = merges.find(m => normNpcName(m.into) === key);
+    if (!step?.from?.trim()) return undefined;
+    current = step.from.trim();
+  }
+  return undefined;
+}
+
 export function cleanKnowledgeScope(raw: unknown): KnowledgeScope | undefined {
   const text = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   if (text === 'private' || text === '私密' || text === '秘密') return 'private';
@@ -143,7 +161,9 @@ function applyNpcArchives(n: MemNpc, src: NpcDelta, mode: 'fill' | 'overwrite'):
 }
 
 function applyNpcFields(n: MemNpc, src: NpcDelta, storyTime: string, mode: 'fill' | 'overwrite'): void {
-  const locked = n.lockedFields;
+  // 同一操作里“解锁并修改”时，新值必须立即生效；新增锁在本次写入后生效。
+  const unlocking = new Set(src.unlock ?? []);
+  const locked = (n.lockedFields ?? []).filter(field => !unlocking.has(field));
   const allow = (field: string): boolean => !isLocked(locked, field);
 
   if (allow('gender') || allow('relation') || allow('ties') || allow('title') || allow('desc') || allow('personality')) {
@@ -168,16 +188,33 @@ function applyNpcFields(n: MemNpc, src: NpcDelta, storyTime: string, mode: 'fill
 
   if (src.aliases?.length) n.aliases = mergeAliasList(n.aliases, src.aliases, n.name);
   if (src.visibility && allow('visibility')) n.visibility = src.visibility;
+  if (allow('affinityInner') || allow('affinityOuter') || allow('affinityNote')) {
+    applyNpcAffinity(n, {
+      affinityInner: allow('affinityInner') ? src.affinityInner : undefined,
+      affinityOuter: allow('affinityOuter') ? src.affinityOuter : undefined,
+      affinityNote: allow('affinityNote') ? src.affinityNote : undefined,
+    }, mode === 'fill');
+  }
   n.lockedFields = applyLockPatch(n.lockedFields, src);
 }
 
 function fillEmptyFrom(into: MemNpc, from: MemNpc): void {
+  const locked = into.lockedFields ?? [];
+  const allow = (field: string) => !isLocked(locked, field);
   for (const key of ['gender', 'relation', 'ties', 'title', 'desc', 'personality', 'outfit', 'condition', 'age', 'ageTime', 'location'] as const) {
+    if (!allow(key === 'ageTime' ? 'age' : key)) continue;
     if (!into[key] && from[key]) into[key] = from[key];
   }
-  if (into.important === undefined && from.important) into.important = from.important;
-  if (into.follow === undefined && from.follow) into.follow = from.follow;
-  if (!into.visibility && from.visibility) into.visibility = from.visibility;
+  if (allow('important') && into.important === undefined && from.important) into.important = from.important;
+  if (allow('follow') && into.follow === undefined && from.follow) into.follow = from.follow;
+  if (allow('visibility') && !into.visibility && from.visibility) into.visibility = from.visibility;
+  if (allow('affinityInner') || allow('affinityOuter') || allow('affinityNote')) {
+    applyNpcAffinity(into, {
+      affinityInner: allow('affinityInner') ? from.affinityInner : undefined,
+      affinityOuter: allow('affinityOuter') ? from.affinityOuter : undefined,
+      affinityNote: allow('affinityNote') ? from.affinityNote : undefined,
+    }, true);
+  }
 }
 
 export function applyNpcMerge(npcs: MemNpc[], fromName: string, intoName: string, t: number): void {
@@ -188,7 +225,11 @@ export function applyNpcMerge(npcs: MemNpc[], fromName: string, intoName: string
   const from = findNpc(npcs, fromKey);
   const into = findNpc(npcs, intoKey);
   if (from && into && from.id === into.id) {
-    if (normNpcName(fromKey) !== normNpcName(into.name)) {
+    if (normNpcName(intoKey) !== normNpcName(into.name)) {
+      const oldName = into.name;
+      into.name = intoKey;
+      into.aliases = mergeAliasList(into.aliases, [oldName, fromKey], into.name);
+    } else if (normNpcName(fromKey) !== normNpcName(into.name)) {
       into.aliases = mergeAliasList(into.aliases, [fromKey], into.name);
     }
     into.updatedAt = t;
@@ -257,7 +298,7 @@ export function applyNpcBook(npcs: MemNpc[], d: NpcBookDelta, ctx: { t: number; 
 
   for (const upd of d.update ?? []) {
     if (!upd?.name?.trim()) continue;
-    let n = findNpc(npcs, upd.name);
+    let n = findNpc(npcs, upd.name) ?? findNpcViaPendingMerges(npcs, upd.name, d.merge ?? []);
     if (!n) {
       n = {
         id: npcId(upd.name),

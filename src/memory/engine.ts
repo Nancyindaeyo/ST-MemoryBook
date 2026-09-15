@@ -19,8 +19,9 @@ import {
   type MemorySessionOperation,
 } from './session';
 import { clearInjection, clearLlmPickInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, selectRecentResolvedPlans, THINKING_CHECKLIST, THINKING_PREFILL } from './prompts';
+import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
+import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, recomputeDerived, scheduleLeafFlush } from './store';
 import type { LeafExtra, SummaryDelta } from './types';
 import { scheduleVectorIndex } from './vector';
@@ -113,12 +114,16 @@ function detachInvalidatedWork(): void {
   floorBackfillState.chatId = '';
   batchState.running = false;
   batchState.cancelRequested = false;
+  // 切聊天 / 切 Persona 会先作废会话再异步载入;窗口内必须立刻清掉上一会话的注入,避免旧记忆泄漏进新生成。
+  clearInjection();
+  clearRecallInjection();
 }
 
 /** 把消息渲染成给摘要模型的文本(cleanBody:裁正文段 + 整块删噪声标签 + 时间标签转文本) */
 function renderMessages(chat: STMessage[], indices: number[], name1: string, name2: string): string {
   const feed = filterSummaryFeedIndices(chat, indices, apiSettings.summarizeAiOnly);
-  const body = feed
+  const sources: SourceExcerpt[] = [];
+  const content = feed
     .map(i => {
       const m = chat[i];
       if (!m) return '';
@@ -127,11 +132,22 @@ function renderMessages(chat: STMessage[], indices: number[], name1: string, nam
       const who = m.is_user ? name1 || 'User' : m.name || name2 || 'Char';
       // cleanBody:裁剪到 <bbs_start>…</bbs_end>(剔除状态栏等正文外格式)+ 整块删噪声标签
       //（思维链/注释/物品旁注/自定义标签)+ 时间标签转可读文本。不再裸删标签。
-      return `【${tag}·${who}】${cleanBody(m.mes)}`;
+      // 只为请求材料编号;使用聊天消息序号,同一正文在单楼与批量中保持相同来源标记。
+      const body = cleanBody(m.mes).split(/\r?\n/)
+        .filter(line => line.trim())
+        .map((line, p) => {
+          const excerpt = { source: `[M${i + 1}-P${p + 1}]`, text: line };
+          sources.push(excerpt);
+          return `${excerpt.source} ${excerpt.text}`;
+        })
+        .join('\n');
+      return `【${tag}·${who}】\n${body}`;
     })
     .filter(Boolean)
     .join('\n\n');
-  return body ? `${summaryFeedNote(apiSettings.summarizeAiOnly)}${body}` : '';
+  return content
+    ? `${summaryFeedNote(apiSettings.summarizeAiOnly)}${content}${renderSourceHints(sources)}`
+    : '';
 }
 
 /** 把去空后的分段去重、join。世界书激活各来源统一收口于此(与旧行为一致)。 */
@@ -530,7 +546,7 @@ function shouldSkipLastAiForGeneration(chat: STMessage[], type: string | undefin
 }
 
 /**
- * 「开场白待摘」场景:最新 AI 楼是**全对话第一条 AI 楼(开场白)**、尚未摘要、且正文无时间标签。
+ * 「开场白待摘」场景:最新 AI 楼是**玩家发言前的第一条 AI 楼(开场白)**、尚未摘要、且正文无时间标签。
  * 返回该开场白楼层索引;不匹配返回 -1。
  *
  * 为何要特判:开场白不是本插件提示词生成的(卡片预设),通常既无 <bbs_start>/<bbs_end> 标签、
@@ -546,7 +562,7 @@ export function openingPendingFloor(chat: STMessage[]): number {
   }
   if (lastAi < 0) return -1;
   for (let i = lastAi - 1; i >= 0; i--) {
-    if (isAiFloor(chat[i])) return -1; // 之前还有别的 AI 楼 → 不是开场白
+    if (chat[i]?.is_user || isAiFloor(chat[i])) return -1; // 前面已有玩家发言或其他 AI 楼 → 不是开场白
   }
   if (importedHistoryCovers(lastAi)) return -1; // 已由导入历史接管,不再为开场白单独造叶子
   if (leafValid(chat[lastAi])) return -1; // 已摘 → 锚点已在
@@ -599,7 +615,8 @@ export async function handleGenerationIntercept(
   // 开场白特判(不拦,只等):开场白无时间标签、又还没摘时,先摘它建立时间锚点,再放行首次生成。
   // 否则主模型与开场白摘要会各自凭空编一个开场时间,导致正文与摘要时间对不上(用户实测)。
   // 摘完(或失败退化)即继续放行——开场白摘要失败不该挡住用户开始游戏。
-  const opening = openingPendingFloor(chat);
+  // 正在翻页/重生成的末楼尚未定稿,即使是真开场白也不能摘旧页来建立锚点。
+  const opening = skipLastAi ? -1 : openingPendingFloor(chat);
   if (opening >= 0) {
     const inflight = currentSummaryPromise();
     if (inflight) {
@@ -1149,7 +1166,11 @@ function applyLeafForFloor(
     srcHash: leafBodyHash(chat[aiFloor].mes),
     v: 1,
   };
-  const quotes = cleanExactQuotes(delta.quotes, clampToTimeTags(chat[aiFloor].mes));
+  const covered = replaceLeaf ? coveredBeforeFloor(chat, aiFloor) : coveredSet(chat);
+  const quoteSource = filterSummaryFeedIndices(chat, floorTargets(chat, aiFloor, covered), apiSettings.summarizeAiOnly)
+    .map(i => clampToTimeTags(chat[i]?.mes ?? ''))
+    .join('\n');
+  const quotes = cleanExactQuotes(delta.quotes, quoteSource);
   if (quotes.length) leaf.quotes = quotes;
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
@@ -1216,8 +1237,14 @@ async function summarizeFloorWork(
     items: stateBefore.items.map(i => ({ name: i.name, qty: i.qty, desc: i.desc, carried: i.carried, location: i.location })),
     itemLog: stateBefore.itemLog,
     scenes: stateBefore.scenes.map(s => ({ path: s.path, desc: s.desc })),
-    npcs: stateBefore.npcs.map(n => ({ name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation, ties: n.ties, title: n.title, important: n.important, outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location })),
-    openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })),
+    npcs: stateBefore.npcs.map(n => ({
+      name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation,
+      affinityInner: n.affinityInner, affinityOuter: n.affinityOuter, affinityNote: n.affinityNote,
+      ties: n.ties, title: n.title, personality: n.personality, important: n.important,
+      outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location,
+      aliases: n.aliases, visibility: n.visibility, lockedFields: n.lockedFields,
+    })),
+    openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime, visibility: p.visibility })),
     // 近期已完成计划:与注入端同口径,截止点用本楼之前的状态(不泄漏未来)
     resolvedPlans: selectRecentResolvedPlans(stateBefore.plans, apiSettings.recentResolvedPlansCount),
     history,
@@ -1229,6 +1256,7 @@ async function summarizeFloorWork(
     varsRule: (['global', 'char', 'chat'] as const).map(t => memory.varTemplates[t].rule.trim()).filter(Boolean).join('\n\n'),
   });
 
+  const { checklist, prefill } = buildSummaryThinking(ctx.name1);
   const messages: ChatMsg[] = [];
   const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
   if (jb) messages.push({ role: 'system', content: jb });
@@ -1236,9 +1264,10 @@ async function summarizeFloorWork(
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
   messages.push(
-    { role: 'user', content: prompt },
-    { role: 'system', content: THINKING_CHECKLIST },
-    { role: 'assistant', content: THINKING_PREFILL },
+    { role: 'system', content: prompt.system },
+    { role: 'user', content: prompt.user },
+    { role: 'system', content: checklist },
+    { role: 'assistant', content: prefill },
   );
   options.onRequestStart?.();
   const delta = await sendAndParse(sender.send, messages, raw => {
@@ -1324,7 +1353,7 @@ export interface BatchBackfillResult {
 /**
  * 按内容量把待摘楼层切成多个块:每块正文累计字符到 maxChars 或楼数到 maxFloors 即切。
  * 单楼正文超 maxChars 时自成一块(不可再分)。每块楼层升序,块间升序。
- * 字符量口径用 renderMessages(与喂模型同一清洗),只算该 AI 楼自身正文(够近似,省去重复算前置 user 楼)。
+ * 与批量请求共用 floorTargets/renderMessages,计入前置玩家消息、段号及原文提醒。
  */
 export function planBatches(chat: STMessage[], floors: number[], maxChars: number, maxFloors: number): number[][] {
   const ctx = getContext();
@@ -1334,10 +1363,11 @@ export function planBatches(chat: STMessage[], floors: number[], maxChars: numbe
   const cap = Math.max(500, maxChars | 0);
 
   const batches: number[][] = [];
+  const covered = coveredSet(chat);
   let cur: number[] = [];
   let curChars = 0;
   for (const f of floors) {
-    const len = renderMessages(chat, [f], name1, name2).length;
+    const len = renderMessages(chat, floorTargets(chat, f, covered), name1, name2).length;
     // 当前块非空,且(加这楼会超字数 或 楼数已达上限)→ 先切块
     if (cur.length && (curChars + len > cap || cur.length >= lo)) {
       batches.push(cur);
@@ -1404,7 +1434,8 @@ async function summarizeBatchWork(
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
   messages.push(
-    { role: 'user', content: prompt },
+    { role: 'system', content: prompt.system },
+    { role: 'user', content: prompt.user },
     { role: 'system', content: checklist },
     { role: 'assistant', content: prefill },
   );
@@ -1585,17 +1616,20 @@ function thresholdForLevel(level: number): number {
  * 故这里把真实时间随正文一并交给模型,让它「看着写」而非凭空造。
  * 时间括注:两端齐→「起 – 止」;只有一端→那一端;都无→不加括注(不硬造)。
  */
-function joinNodesForResummary(nodes: Array<{ text: string; timeStart?: string; timeEnd?: string }>): string {
-  return nodes
-    .map((n, i) => {
-      const start = llmOptionalScalar(n.timeStart);
-      const end = llmOptionalScalar(n.timeEnd);
-      let time = '';
-      if (start && end) time = start === end ? `(${start}) ` : `(${start} – ${end}) `;
-      else if (start || end) time = `(${start || end}) `;
-      return `[${i + 1}] ${time}${n.text}`;
-    })
-    .join('\n\n');
+function joinNodesForResummary(nodes: Array<{ text: string; timeStart?: string; timeEnd?: string }>): { content: string; hints: string } {
+  const sources = nodes.map((n, i) => {
+    const start = llmOptionalScalar(n.timeStart);
+    const end = llmOptionalScalar(n.timeEnd);
+    let time = '';
+    if (start && end) time = start === end ? `(${start}) ` : `(${start} – ${end}) `;
+    else if (start || end) time = `(${start || end}) `;
+    return { source: `[${i + 1}]`, text: `${time}${n.text}` };
+  });
+  // 提醒只在预算计算后附加到材料,不能用重复原文抬高二次总结的目标字数。
+  return {
+    content: sources.map(({ source, text }) => `${source} ${text}`).join('\n\n'),
+    hints: renderSourceHints(sources),
+  };
 }
 
 /** 压缩用的根节点视图:带起止时间(叶子直接取,comp 取已聚合的范围),供向上合并时取边界。 */
@@ -1670,7 +1704,7 @@ export async function checkResummary(): Promise<number> {
     }
 
     const batch = roots.slice(0, threshold);
-    const content = joinNodesForResummary(batch);
+    const { content, hints } = joinNodesForResummary(batch);
     // 传**输出层级**(level+1):L1(普通总结,300-500字)/ L2+(二次总结,字数随输入动态)
     const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level: level + 1 });
 
@@ -1678,7 +1712,12 @@ export async function checkResummary(): Promise<number> {
       const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
       const messages: ChatMsg[] = [];
       if (jb) messages.push({ role: 'system', content: jb });
-      messages.push({ role: 'user', content: prompt });
+      messages.push(
+        { role: 'system', content: prompt.system },
+        { role: 'user', content: prompt.user + hints },
+        { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
+        { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
+      );
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
       const delta = await sendAndParse(sender.send, messages, raw => {
         console.log('[柏宝书] 总结原始返回(未清洗):\n', raw);
@@ -1838,7 +1877,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
   }
 
   const level = Math.max(...picked.map(n => n.level)) + 1;
-  const content = joinNodesForResummary(picked);
+  const { content, hints } = joinNodesForResummary(picked);
   const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level });
 
   const busyOwner = beginBusyWork();
@@ -1847,7 +1886,12 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
     const messages: ChatMsg[] = [];
     if (jb) messages.push({ role: 'system', content: jb });
-    messages.push({ role: 'user', content: prompt });
+    messages.push(
+      { role: 'system', content: prompt.system },
+      { role: 'user', content: prompt.user + hints },
+      { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
+      { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
+    );
     const delta = await sendAndParse(sender.send, messages, raw => {
       console.log('[柏宝书] 强制总结原始返回(未清洗):\n', raw);
       const d = extractJsonObject<{ summary?: string }>(raw);

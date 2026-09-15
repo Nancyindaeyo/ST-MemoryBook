@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { apiSettings } from '@/api/settings';
 import Icon from '@/components/Icon.vue';
+import BbsSelect from '@/components/BbsSelect.vue';
+import { fmtLifeDetail, lifeDetailSubject } from '@/memory/lifeDetails';
+import { NPC_AFFINITY_FIELDS, affinityLevelFromInput, fmtNpcAffinity } from '@/memory/npcRelations';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import SummaryOnlyNotice from '@/components/SummaryOnlyNotice.vue';
@@ -152,12 +155,18 @@ function removeDetail(d: MemLifeDetail) {
 }
 
 /* 生活细节 添加/编辑弹窗 */
-const detailEditing = ref<{ id: string | null; text: string; topics: string; anchors: string; until: string } | null>(null);
+const detailEditing = ref<{ id: string | null; subject: string; text: string; topics: string; anchors: string; until: string } | null>(null);
+const detailSubjectOptions = computed(() => [
+  { value: 'user', label: `主角 · ${protagonistName.value}` },
+  // 保留已删除/改名角色的历史归属选项,打开编辑不能悄悄改成 user。
+  ...[...new Set([...memory.npcs.map(n => n.name), ...memory.lifeDetails.map(lifeDetailSubject)])]
+    .filter(name => name !== 'user').map(name => ({ value: name, label: name })),
+]);
 function openDetailComposer() {
-  detailEditing.value = { id: null, text: '', topics: '', anchors: '', until: '' };
+  detailEditing.value = { id: null, subject: 'user', text: '', topics: '', anchors: '', until: '' };
 }
 function openDetailEdit(d: MemLifeDetail) {
-  detailEditing.value = { id: d.id, text: d.text, topics: d.topics.join('/'), anchors: d.anchors.join('/'), until: d.until ?? '' };
+  detailEditing.value = { id: d.id, subject: lifeDetailSubject(d), text: d.text, topics: d.topics.join('/'), anchors: d.anchors.join('/'), until: d.until ?? '' };
 }
 function cancelDetailEdit() {
   detailEditing.value = null;
@@ -169,8 +178,8 @@ function saveDetailEdit() {
   const anchors = e.anchors.split(/[\/、,，]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
   const until = e.until.trim();
   const ok = e.id
-    ? updateLifeDetail(e.id, { text: e.text.trim(), topics, anchors, until })
-    : addLifeDetail({ text: e.text.trim(), topics, anchors, until: until || undefined });
+    ? updateLifeDetail(e.id, { subject: e.subject, text: e.text.trim(), topics, anchors, until })
+    : addLifeDetail({ subject: e.subject, text: e.text.trim(), topics, anchors, until: until || undefined });
   if (ok) detailEditing.value = null;
 }
 
@@ -231,6 +240,9 @@ interface NpcDraft {
   gender: string;
   age: string;
   relation: string;
+  affinityInner: string;
+  affinityOuter: string;
+  affinityNote: string;
   ties: string;
   title: string;
   personality: string;
@@ -244,7 +256,7 @@ interface NpcDraft {
   visibility: KnowledgeScope | '';
 }
 function emptyDraft(): NpcDraft {
-  return { name: '', gender: '', age: '', relation: '', ties: '', title: '', personality: '', desc: '', outfit: '', condition: '', important: false, follow: false, location: memory.state.location || '', aliases: '', visibility: '' };
+  return { name: '', gender: '', age: '', relation: '', affinityInner: '', affinityOuter: '', affinityNote: '', ties: '', title: '', personality: '', desc: '', outfit: '', condition: '', important: false, follow: false, location: memory.state.location || '', aliases: '', visibility: '' };
 }
 const draft = ref<NpcDraft>(emptyDraft());
 
@@ -265,6 +277,9 @@ function addNpc() {
     gender: d.gender,
     age: d.age,
     relation: d.relation,
+    affinityInner: affinityLevelFromInput(d.affinityInner),
+    affinityOuter: affinityLevelFromInput(d.affinityOuter),
+    affinityNote: d.affinityNote,
     ties: d.ties,
     title: d.title,
     personality: d.personality,
@@ -296,6 +311,9 @@ function openEdit(npc: MemNpc) {
     gender: npc.gender ?? '',
     age: npc.age ?? '',
     relation: npc.relation ?? '',
+    affinityInner: npc.affinityInner == null ? '' : String(npc.affinityInner),
+    affinityOuter: npc.affinityOuter == null ? '' : String(npc.affinityOuter),
+    affinityNote: npc.affinityNote ?? '',
     ties: npc.ties ?? '',
     title: npc.title ?? '',
     personality: npc.personality ?? '',
@@ -322,6 +340,9 @@ function saveEdit() {
     gender: e.gender,
     age: e.age,
     relation: e.relation,
+    affinityInner: affinityLevelFromInput(e.affinityInner),
+    affinityOuter: affinityLevelFromInput(e.affinityOuter),
+    affinityNote: e.affinityNote,
     ties: e.ties,
     title: e.title,
     personality: e.personality,
@@ -384,7 +405,7 @@ function confirmRemove() {
 
     <hr class="bbs-rule" />
 
-    <!-- ===== 生活小档案:主角的偏好/习惯/近期状态(三投放层)。置于主角卡之上且可折叠,不打断下方角色卡流 ===== -->
+    <!-- ===== 生活小档案:主角与主要角色的偏好/习惯/近期状态(三投放层)。置于主角卡之上且可折叠,不打断下方角色卡流 ===== -->
     <div class="bbs-protagonist-section">
       <div class="bbs-npc-grouphead">
         <button
@@ -417,7 +438,7 @@ function confirmRemove() {
           <div v-if="lifeList.length" class="bbs-life-group">
             <article v-for="d in lifeList" :key="d.id" class="bbs-life" :class="`is-${d.tier}`">
               <div class="bbs-life-main">
-                <p class="bbs-life-text">{{ d.text }}</p>
+                <p class="bbs-life-text">{{ fmtLifeDetail(d, protagonistName) }}</p>
                 <div v-if="d.topics.length || d.until" class="bbs-life-meta">
                   <span v-if="d.topics.length" class="bbs-life-tag">{{ d.topics.join(' / ') }}</span>
                   <span v-if="d.until" class="bbs-life-until">至 {{ d.until }}</span>
@@ -446,7 +467,7 @@ function confirmRemove() {
               </span>
             </article>
           </div>
-          <p v-if="!memory.lifeDetails.length" class="bbs-npc-mainhint">尚无生活细节。摘要会在主角明说偏好/习惯/近况时记下(只记明说过的),也可手动添加。</p>
+          <p v-if="!memory.lifeDetails.length" class="bbs-npc-mainhint">尚无生活细节。摘要会记录主角及主要角色明确说过/正文揭示的偏好、习惯和近况,每条标明所属人物;也可手动添加或纠正归属。</p>
         </div>
       </div>
     </div>
@@ -511,9 +532,10 @@ function confirmRemove() {
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.title || n.relation || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
+              <dl v-if="n.title || n.relation || fmtNpcAffinity(n) || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
                   <dt>所在</dt>
                   <dd :class="{ 'is-follow': n.follow }">{{ n.follow ? '随主角同行' : n.location }}</dd>
@@ -565,9 +587,10 @@ function confirmRemove() {
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.title || n.relation || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
+              <dl v-if="n.title || n.relation || fmtNpcAffinity(n) || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location" class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
                   <dt>所在</dt>
                   <dd :class="{ 'is-follow': n.follow }">{{ n.follow ? '随主角同行' : n.location }}</dd>
@@ -620,9 +643,10 @@ function confirmRemove() {
                   <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="askRemove(n)"><Icon name="trash" /></button>
                 </span>
               </div>
-              <dl v-if="n.title || n.relation || n.personality || n.location" class="bbs-npc-fields">
+              <dl v-if="n.title || n.relation || fmtNpcAffinity(n) || n.personality || n.location" class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div v-if="n.location" class="bbs-npc-field f-loc"><dt>所在</dt><dd>{{ n.location }}</dd></div>
                 <div v-if="n.personality" class="bbs-npc-field f-trait"><dt>性格</dt><dd>{{ n.personality }}</dd></div>
               </dl>
@@ -636,7 +660,7 @@ function confirmRemove() {
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag">不在场</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
-            {{ apiSettings.summaryOnlyMode ? '仍保留名册分档，但不发送给主对话 AI' : '仅发送名字与身份,省 token' }}
+            {{ apiSettings.summaryOnlyMode ? '仍保留名册分档，但不发送给主对话 AI' : '仅发送简要名册与已有好感档位,省 token' }}
           </span>
         </div>
         <div class="bbs-npc-list">
@@ -671,6 +695,7 @@ function confirmRemove() {
               <dl class="bbs-npc-fields">
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
+                <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div class="bbs-npc-field f-loc">
                   <dt>所在</dt>
                   <dd v-if="n.location">{{ n.location }}</dd>
@@ -748,8 +773,12 @@ function confirmRemove() {
           <button class="bbs-item-act" type="button" title="关闭" @click="cancelDetailEdit"><Icon name="close" /></button>
         </header>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">细节内容(主角明说过的偏好/习惯/近期状态)</span>
-          <textarea v-model="detailEditing.text" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:不吃香菜 / 最近在赶项目死线"></textarea>
+          <span class="bbs-modal-label">所属人物</span>
+          <BbsSelect v-model="detailEditing.subject" :options="detailSubjectOptions" aria-label="生活细节所属人物" />
+        </label>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">细节内容(此人明说过/正文揭示的偏好、习惯或近期状态)</span>
+          <textarea v-model="detailEditing.text" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:认为煎饼果子不加脆饼就没有灵魂(姓名由所属人物自动显示)"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">主题标签(可选,1-3 个,斜杠分隔)</span>
@@ -808,6 +837,14 @@ function confirmRemove() {
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">与主角的关系(称谓在前 + 一句态度)</span>
           <textarea v-model="draft.relation" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:主角的师姐,明面冷淡暗中维护"></textarea>
+        </label>
+        <div v-for="f in NPC_AFFINITY_FIELDS" :key="f.key" class="bbs-modal-field">
+          <span class="bbs-modal-label">{{ f.label }}(对 {{ protagonistName }})</span>
+          <BbsSelect v-model="draft[f.key]" :options="f.options" :aria-label="f.label" />
+        </div>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">好感说明(定性估计,不是本轮心情;未知不等于中性)</span>
+          <textarea v-model="draft.affinityNote" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:内心在意,但习惯以冷淡掩饰;没有新依据时保持不变"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">与其他角色的关系(仅血缘 / 婚姻 / 宿敌等长期关系)</span>
@@ -911,6 +948,14 @@ function confirmRemove() {
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">与主角的关系(称谓在前 + 一句态度)</span>
           <textarea v-model="editing.relation" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:主角的师姐,明面冷淡暗中维护"></textarea>
+        </label>
+        <div v-for="f in NPC_AFFINITY_FIELDS" :key="f.key" class="bbs-modal-field">
+          <span class="bbs-modal-label">{{ f.label }}(对 {{ protagonistName }})</span>
+          <BbsSelect v-model="editing[f.key]" :options="f.options" :aria-label="f.label" />
+        </div>
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">好感说明(定性估计,不是本轮心情;未知不等于中性)</span>
+          <textarea v-model="editing.affinityNote" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:内心在意,但习惯以冷淡掩饰;没有新依据时保持不变"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">与其他角色的关系(仅血缘 / 婚姻 / 宿敌等长期关系)</span>

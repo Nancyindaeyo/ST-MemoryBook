@@ -122,6 +122,14 @@ export async function requestCompletion(
  *   退回用 ST 的 Custom 密钥,可能把用户另一个服务商的 key 发到本端点。
  *   故一律用 JSON.stringify 生成(YAML 是 JSON 的超集),转义交给它,不手拼。
  *
+ * 另:请求体固定带 `tool_choice: 'none'`,这是给第三方 fetch 拦截器的声明式放行握手。
+ * 酒馆助手预设脚本(如 Kemini Dramatron 面板)可能 monkey-patch `window.parent.fetch`,
+ * 拦截所有 `/api/backends/…/generate` 请求并塞入合成工具 + 控制消息,把摘要劫持成
+ * 工具调用(实测拖慢数倍)。这类拦截器普遍支持「调用方自带 tool_choice 就放行」
+ * (Dramatron 的 callerControlsTools 对 'none' 明确 bypass),所以我们主动声明不用工具。
+ * 对上游无影响:ST 服务端只在 tools 为非空数组时才转发 tool_choice
+ * (src/endpoints/backends/chat-completions.js),本函数从不发 tools,该字段到不了服务商。
+ *
  * (与柏宝绘 src/api/client.ts 的同名函数同源,行为保持一致。)
  */
 export function buildRequestBody(
@@ -137,6 +145,8 @@ export function buildRequestBody(
     temperature: channel.temperature ?? 1.0,
     max_tokens: channel.maxTokens ?? 65535,
     stream,
+    // 不用工具:见函数头注释,防第三方 fetch 拦截器把摘要改写成工具调用
+    tool_choice: 'none',
     // 静默:不影响主对话状态
     presence_penalty: 0,
     frequency_penalty: 0,
@@ -286,6 +296,9 @@ export function mainApiAvailable(): boolean {
  * 用「当前主 API」(主界面正在用的聊天补全/文本补全设置)发一次补全。
  * 走 ST 的 generateRaw:只发我们给的这几条消息,不带聊天历史/角色卡;无需连接档。
  * quiet 类型内部强制非流式,返回清洗后的整段文本;失败抛 ApiError。
+ *
+ * ⚠️ 这条路径的请求体由 ST 构造,带不上 `tool_choice: 'none'`,第三方 fetch 拦截器
+ * (如防截断脚本)仍可能改写它。摘要/重摘要尽量指派副 API 渠道,走 buildRequestBody 那条路。
  */
 export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOptions = {}): Promise<string> {
   const ctx = getContext();

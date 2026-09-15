@@ -1,4 +1,4 @@
-import type { MemNpc } from './types';
+import type { MemNpc, NpcAffinity, NpcAffinityLevel } from './types';
 
 function oneLine(value: string | undefined): string {
   return (value ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
@@ -41,7 +41,7 @@ export function fmtNpcTiesContext(npcs: Pick<MemNpc, 'name' | 'ties'>[]): string
   return rows.length ? `角色长期关系(血缘/婚姻/主仆/宿敌等，不因是否在场而失效):\n${rows.join('\n')}` : '';
 }
 
-export interface NpcSummaryView {
+export interface NpcSummaryView extends NpcAffinity {
   name: string;
   gender?: string;
   age?: string;
@@ -49,6 +49,7 @@ export interface NpcSummaryView {
   relation?: string;
   ties?: string;
   title?: string;
+  personality?: string;
   important?: boolean;
   outfit?: string;
   condition?: string;
@@ -74,6 +75,9 @@ export function fmtNpcSummaryList(npcs: NpcSummaryView[]): string {
       if (oneLine(n.title)) tail.push(oneLine(n.title));
       if (oneLine(n.relation)) tail.push(`与主角:${oneLine(n.relation)}`);
       if (oneLine(n.ties)) tail.push(`人际:${oneLine(n.ties)}`);
+      if (oneLine(n.personality)) tail.push(`性格:${oneLine(n.personality)}`);
+      const affinity = fmtNpcAffinity(n);
+      if (affinity) tail.push(`对主角的好感与态度估计[${affinity}]`);
       const title = tail.length ? ` —— ${tail.join(';')}` : '';
       const state: string[] = [];
       if (oneLine(n.outfit)) state.push(`着装:${oneLine(n.outfit)}`);
@@ -87,3 +91,59 @@ export function fmtNpcSummaryList(npcs: NpcSummaryView[]): string {
     })
     .join('\n');
 }
+
+export const NPC_AFFINITY_LABELS = {
+  affinityInner: ['强烈反感', '不喜欢', '无明显好恶', '有好感', '感情深厚'],
+  affinityOuter: ['明显敌对', '冷淡疏远', '不明显亲近或排斥', '友善亲近', '明显亲近、积极表达'],
+} as const;
+
+/** 页面和楼层编辑共用档位,只显示文字,不提供加减分或进度条。 */
+export const NPC_AFFINITY_FIELDS = (['affinityInner', 'affinityOuter'] as const).map(key => ({
+  key,
+  label: key === 'affinityInner' ? '内心好感' : '外在态度',
+  options: [
+    { value: '', label: '未知' },
+    ...NPC_AFFINITY_LABELS[key].map((label, i) => ({ value: String(i - 2), label })),
+  ],
+}));
+
+/** 拒绝百分制、小数、字符串和布尔值,不能把非法值截断成某个真实档位。 */
+export function cleanNpcAffinityLevel(value: unknown): NpcAffinityLevel | null | undefined {
+  if (value === null) return null;
+  return typeof value === 'number' && Number.isInteger(value) && value >= -2 && value <= 2
+    ? value as NpcAffinityLevel : undefined;
+}
+
+/** 下拉框的空选项表示未知,不是 Number('') 所得到的中性。 */
+export function affinityLevelFromInput(value: string): NpcAffinityLevel | null | undefined {
+  return cleanNpcAffinityLevel(value === '' ? null : Number(value));
+}
+
+/** 独立覆盖补丁;重复 add 只补未知,不能用复述覆盖已经建立的倾向。 */
+export function applyNpcAffinity(target: NpcAffinity, patch: NpcAffinity, fillMissing = false): void {
+  for (const { key } of NPC_AFFINITY_FIELDS) {
+    const value = cleanNpcAffinityLevel(patch[key]);
+    if (value !== undefined && (!fillMissing || target[key] == null)) target[key] = value;
+  }
+  if (typeof patch.affinityNote === 'string' && (!fillMissing || !target.affinityNote)) {
+    target.affinityNote = patch.affinityNote.trim();
+  }
+}
+
+/** 完整状态显示两侧(缺失为未知);楼层 delta 只显示本次真正提供的字段。 */
+export function fmtNpcAffinity(npc: NpcAffinity, partial = false, includeNote = true): string {
+  const hasLevels = NPC_AFFINITY_FIELDS.some(({ key }) => cleanNpcAffinityLevel(npc[key]) !== undefined);
+  if (!hasLevels && !npc.affinityNote?.trim() && !(partial && npc.affinityNote === '')) return '';
+  const parts: string[] = [];
+  for (const { key, label } of NPC_AFFINITY_FIELDS) {
+    const value = cleanNpcAffinityLevel(npc[key]);
+    if (partial && value === undefined) continue;
+    parts.push(`${label}:${value == null ? '未知' : NPC_AFFINITY_LABELS[key][value + 2]}`);
+  }
+  if (includeNote && npc.affinityNote?.trim()) parts.push(`说明:${npc.affinityNote.trim().replace(/\s*[\r\n]+\s*/g, ' ')}`);
+  else if (includeNote && partial && npc.affinityNote === '') parts.push('好感说明:清空');
+  return parts.join(';');
+}
+
+/** 只在确有好感记录时注入;估计不能变成读心、剧情事实或强制行为指令。 */
+export const NPC_AFFINITY_BRIEFING = '内心好感与外在态度是对主角的五档定性估计,不是精确分数或既定事实。内在是真实倾向估计,外在是相对稳定的对待方式,二者独立且通常保持;一次语气/情绪变化不等于关系跨档。未知不等于中性。以明确剧情与人设为准,好感不等于爱情、信任、服从或同意;内在估计不代表主角或其他角色知情,不得读心、揭穿伪装或复述档位,按视角自然表现即可。';

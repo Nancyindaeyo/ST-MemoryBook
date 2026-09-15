@@ -16,6 +16,8 @@
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue';
 import Icon from '@/components/Icon.vue';
+import BbsSelect from '@/components/BbsSelect.vue';
+import { NPC_AFFINITY_FIELDS, affinityLevelFromInput, fmtNpcAffinity } from '@/memory/npcRelations';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
@@ -127,6 +129,7 @@ const NPC_FIELDS = [
   { key: 'title', draft: 'title', label: '身份' },
   { key: 'age', draft: 'npcAge', label: '年龄' },
   { key: 'relation', draft: 'relation', label: '关系' },
+  { key: 'affinityNote', draft: 'affinityNote', label: '好感说明' },
   { key: 'outfit', draft: 'outfit', label: '着装' },
   { key: 'condition', draft: 'condition', label: '状态' },
   { key: 'desc', draft: 'npcDesc', label: '外貌' },
@@ -143,6 +146,8 @@ function fmtNpc(x: NpcDelta): { text: string; sub?: string } {
   // 身份已进主文本(名·身份),副文本从「年龄」起,避免重复
   if (x.age) parts.push(`年龄:${x.age}`);
   if (x.relation) parts.push(`关系:${x.relation}`);
+  const affinity = fmtNpcAffinity(x, true);
+  if (affinity) parts.push(`好感估计:${affinity}`);
   if (x.outfit) parts.push(`着装:${x.outfit}`);
   if (x.condition) parts.push(`状态:${x.condition}`);
   if (x.desc) parts.push(`外貌:${x.desc}`);
@@ -281,6 +286,7 @@ const edit = reactive<{
   text: string; timeStart: string; timeEnd: string; location: string;
   name: string; qty: string; desc: string; content: string;
   title: string; npcAge: string; relation: string; ties: string; outfit: string; condition: string; npcDesc: string; personality: string; npcLoc: string;
+  affinityInner: string; affinityOuter: string; affinityNote: string;
   varPath: string; varKey: string; varValue: string; varDelta: string;
 }>({
   text: '',
@@ -294,6 +300,9 @@ const edit = reactive<{
   title: '',
   npcAge: '',
   relation: '',
+  affinityInner: '',
+  affinityOuter: '',
+  affinityNote: '',
   ties: '',
   outfit: '',
   condition: '',
@@ -412,18 +421,19 @@ function saveLoc() {
 // 当前正在编辑的角色 tag,本轮实际存在的字段(供模板按需渲染)。
 // 关键:update delta 只含本轮改动的字段——若把全部字段都渲染成空框,用户会误以为「这角色没有这些数据」,
 // 其实只是本轮没改。故只渲染 delta 里已存在(!== undefined)的字段;新增(add)则给全字段以便补全。
-const npcEditFields = computed(() => {
+const editingNpcDelta = computed(() => {
   const key = editKey.value;
-  if (!key || !key.startsWith('npc:')) return [];
+  if (!key?.startsWith('npc:')) return undefined;
   const [, bucket, idxStr] = key.split(':');
-  if (bucket === 'remove') return [];
-  const idx = Number(idxStr);
-  const x = (bucket === 'add' ? d.value?.npcs?.add : d.value?.npcs?.update)?.[idx];
-  if (!x) return [];
-  // add 是新登场角色,允许补全所有字段;update 只暴露本轮已带的字段
-  if (bucket === 'add') return NPC_FIELDS;
-  const rec = x as unknown as Record<string, unknown>;
-  return NPC_FIELDS.filter(f => rec[f.key] !== undefined);
+  return (bucket === 'add' ? d.value?.npcs?.add : bucket === 'update' ? d.value?.npcs?.update : undefined)?.[Number(idxStr)];
+});
+const npcEditFields = computed(() => {
+  const npc = editingNpcDelta.value;
+  return npc ? NPC_FIELDS.filter(f => editKey.value?.startsWith('npc:add:') || npc[f.key] !== undefined) : [];
+});
+const npcAffinityEditFields = computed(() => {
+  const npc = editingNpcDelta.value;
+  return npc ? NPC_AFFINITY_FIELDS.filter(f => editKey.value?.startsWith('npc:add:') || npc[f.key] !== undefined) : [];
 });
 
 /* —— 物品 / 角色 / 计划 就地改字段 —— */
@@ -439,6 +449,9 @@ function editTag(tag: Tag) {
   edit.title = '';
   edit.npcAge = '';
   edit.relation = '';
+  edit.affinityInner = '';
+  edit.affinityOuter = '';
+  edit.affinityNote = '';
   edit.ties = '';
   edit.outfit = '';
   edit.condition = '';
@@ -467,6 +480,9 @@ function editTag(tag: Tag) {
       edit.title = x?.title ?? '';
       edit.npcAge = x?.age ?? '';
       edit.relation = x?.relation ?? '';
+      edit.affinityInner = x?.affinityInner == null ? '' : String(x.affinityInner);
+      edit.affinityOuter = x?.affinityOuter == null ? '' : String(x.affinityOuter);
+      edit.affinityNote = x?.affinityNote ?? '';
       edit.ties = x?.ties ?? '';
       edit.outfit = x?.outfit ?? '';
       edit.condition = x?.condition ?? '';
@@ -521,8 +537,15 @@ function saveTag(tag: Tag) {
           const prevAge = x.age;
           for (const f of NPC_FIELDS) {
             const t = (edit[f.draft] as string).trim();
-            if (t) rec[f.key] = t;
+            // 好感说明的空字符串是显式清空;省略才是保留上一层,不能混用。
+            if (t || (f.key === 'affinityNote' && x.affinityNote !== undefined)) rec[f.key] = t;
             else delete rec[f.key];
+          }
+          for (const { key } of NPC_AFFINITY_FIELDS) {
+            // update 未提供的一侧必须继续省略,不能因编辑另一侧而写成未知。
+            if (x[key] !== undefined || (tag.bucket === 'add' && edit[key] !== '')) {
+              x[key] = affinityLevelFromInput(edit[key]);
+            }
           }
           // 年龄被改动时清掉 delta 里可能残留的旧锚点(手动编辑写入的 ageTime),
           // 让重放按本叶子时间盖新锚点;没改则保留原锚点不动。
@@ -783,6 +806,10 @@ const groups = computed(() => [
                             <span class="bbs-fp-nlabel">名称</span>
                             <textarea :ref="setFocus" v-model="edit.name" rows="1" class="bbs-input bbs-fp-nfield" placeholder="名称" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
                           </label>
+                          <div v-for="f in npcAffinityEditFields" :key="f.key" class="bbs-fp-nrow">
+                            <span class="bbs-fp-nlabel">{{ f.label }}</span>
+                            <BbsSelect v-model="edit[f.key]" :options="f.options" :aria-label="f.label" class="bbs-fp-nfield" />
+                          </div>
                           <label v-for="f in npcEditFields" :key="f.draft" class="bbs-fp-nrow">
                             <span class="bbs-fp-nlabel">{{ f.label }}</span>
                             <textarea v-model="edit[f.draft]" rows="1" class="bbs-input bbs-fp-nfield" :placeholder="f.label" @input="onTextInput" @keydown="onFieldKeydown"></textarea>

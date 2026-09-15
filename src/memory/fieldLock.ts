@@ -17,6 +17,9 @@ export const NPC_LOCKABLE_FIELDS = [
   'follow',
   'location',
   'visibility',
+  'affinityInner',
+  'affinityOuter',
+  'affinityNote',
 ] as const;
 
 export const PROTAGONIST_LOCKABLE_FIELDS = [
@@ -48,6 +51,9 @@ const NPC_LOCK_LABELS: Record<string, string> = {
   follow: '随行',
   location: '所在',
   visibility: '知情',
+  affinityInner: '内心好感',
+  affinityOuter: '外在态度',
+  affinityNote: '好感说明',
 };
 
 const PROTAGONIST_LOCK_LABELS: Record<string, string> = {
