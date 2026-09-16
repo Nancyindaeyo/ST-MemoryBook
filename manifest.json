@@ -3,10 +3,10 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "dist/index.js?ver=1.4.1",
+  "js": "dist/index.js?ver=1.4.2",
   "generate_interceptor": "bbs_generateInterceptor",
   "author": "柏柏",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "homePage": "https://github.com/Nancyindaeyo/ST-MemoryBook",
   "auto_update": false,
   "minimum_client_version": "1.12.13"

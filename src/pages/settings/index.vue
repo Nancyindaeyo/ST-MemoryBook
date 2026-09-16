@@ -1052,6 +1052,12 @@ function exportPublicApiDocument() {
         <p class="bbs-field-hint">在场角色全量、同区域从简、不在场仅名与身份;依赖场景信息。</p>
 
         <label class="bbs-switch-row">
+          <span class="bbs-field-label">角色好感估计</span>
+          <input v-model="apiSettings.injection.npcAffinity" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs" />
+        </label>
+        <p class="bbs-field-hint">NPC 名册里的五档好感估计(内心好感/外在态度/说明)。记录与角色页展示始终开启;关闭后名册照发、只是不附带好感——适合角色卡自带好感系统、不想两套并行的场合。</p>
+
+        <label class="bbs-switch-row">
           <span class="bbs-field-label">物品信息</span>
           <input v-model="apiSettings.injection.items" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
         </label>

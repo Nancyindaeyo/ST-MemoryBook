@@ -141,6 +141,11 @@ function applyNpcPlacement(n: MemNpc, src: NpcDelta): void {
     if (loc) {
       n.location = loc;
       if (n.follow === undefined) n.follow = false;
+    } else {
+      // 空字符串=所在不明:清掉旧地点,避免继续判在场。
+      // 不改 follow:模型认为「随行就不必填 location」而顺手写空串时,
+      // 不能因此把随行同伴取消掉(要离队必须显式 follow:false)。
+      n.location = undefined;
     }
   }
 }

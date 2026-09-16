@@ -179,6 +179,9 @@ export interface InjectionSections {
   protagonist: boolean;
   /** NPC 名册(依赖场景信息) */
   npcs: boolean;
+  /** NPC 名册内的五档好感估计(内心好感/外在态度/说明);关闭后名册照发,只是不附带好感。
+   *  适合角色卡自带好感系统、不想两套并行的场合。仅控制注入,记录与页面展示始终开启。 */
+  npcAffinity: boolean;
   /** 物品清单(依赖场景信息) */
   items: boolean;
   /** 场景信息(当前地点+祖先链+其他已知地点);关闭后 NPC/物品随之不注入 */
@@ -373,7 +376,7 @@ function defaults(): ApiSettings {
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
     summarizeAiOnly: false,
-    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, items: true, scenes: true, budgetTokens: 0 },
+    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, budgetTokens: 0 },
     llmPick: { enabled: false, maxLeaves: 4, maxPrequelChunks: 3 },
     keepRecent: 3,
     excludedChars: [],
@@ -452,6 +455,7 @@ function normalize(raw: unknown): ApiSettings {
     lifeDetails: typeof ri.lifeDetails === 'boolean' ? ri.lifeDetails : true,
     protagonist: typeof ri.protagonist === 'boolean' ? ri.protagonist : true,
     npcs: typeof ri.npcs === 'boolean' ? ri.npcs : true,
+    npcAffinity: typeof ri.npcAffinity === 'boolean' ? ri.npcAffinity : true,
     items: typeof ri.items === 'boolean' ? ri.items : true,
     scenes: typeof ri.scenes === 'boolean' ? ri.scenes : true,
     budgetTokens: Number.isFinite(ri.budgetTokens) && (ri.budgetTokens as number) >= 0

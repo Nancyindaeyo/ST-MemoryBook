@@ -11,9 +11,11 @@ import { invalidateRecallCache } from './vector/cache';
 import { applyLockPatch, changedLockableFields, cleanNpcLockFields, cleanProtagonistLockFields, isLocked, NPC_LOCKABLE_FIELDS, PROTAGONIST_LOCKABLE_FIELDS } from './fieldLock';
 import { applyNpcBook, cleanKnowledgeScope, findNpc, npcId, stripManualNpcLocks } from './npcIdentity';
 import { createEmptyMemory } from './types';
-import type { BaibaiMemory, ItemDelta, ItemLogEntry, JsonValue, KnowledgeScope, LeafExtra, LifeDetailAdd, LifeDetailUpdate, MemLifeDetail, MemNpc, MemPlan, MemScene, MemSummary, NpcAffinity, NpcDelta, NpcMerge, PlanResolveItem, ProtagonistDelta, SceneDelta, SceneFocus, SceneOp, SceneReparent, StoredDelta, SummaryDelta, VarOp, VarTemplate, VarTier } from './types';
+import type { BaibaiMemory, ItemDelta, ItemLogEntry, JsonValue, KnowledgeScope, LeafExtra, LifeDetailAdd, LifeDetailUpdate, MemLifeDetail, MemNpc, MemPlan, MemScene, MemSummary, NpcAffinity, NpcDelta, NpcMerge, NpcPresence, PlanResolveItem, ProtagonistDelta, SceneDelta, SceneFocus, SceneOp, SceneReparent, StoredDelta, SummaryDelta, VarOp, VarTemplate, VarTier } from './types';
 
 export { findNpc, npcId } from './npcIdentity';
+// 供既有调用方继续从 apply 取在场类型;定义在 types.ts 与名册展示共用。
+export type { NpcPresence } from './types';
 
 let idSeq = 0;
 /** 生成稳定唯一 id(不依赖 random;时间走 nowMs 便于测试注入) */
@@ -195,7 +197,9 @@ function cleanNpcDelta(raw: unknown): NpcDelta | null {
     condition: patchText(raw.condition),
     important: optBool(raw.important),
     follow: optBool(raw.follow),
-    location: optText(raw.location),
+    // 同 outfit/condition 的补丁语义:省略=保持旧值,空字符串=明确清空(离场且去向未明 → 所在不明)。
+    // 此前用 optText 会把空串洗成 undefined,导致 AI 无法清掉旧地点、离场后仍被判为在场。
+    location: patchText(raw.location),
     aliases: cleanAliasList(raw.aliases),
     visibility: cleanKnowledgeScope(raw.visibility),
     lock: cleanNpcLockFields(raw.lock),
@@ -630,8 +634,6 @@ export function sceneRelation(pPath: string[], nPath: string[]): SceneRel {
   return p - common === 1 ? 'near' : 'far';               // 旁支:共享直接父才算近
 }
 
-export type NpcPresence = 'present' | 'nearby' | 'absent';
-
 /**
  * NPC 在场分档的**唯一权威**:注入端(inject.ts)与 NPC 页(pages/npcs)都调它,杜绝两套逻辑漂移
  * (NPC 页曾复刻旧逻辑、又没用 locationPath,把主角误定位到同名旁支节点、错判在场——正是本函数要根治的)。
@@ -772,25 +774,6 @@ function applyPlacement(it: { carried?: boolean; location?: string }, src: ItemD
     if (loc) {
       it.location = loc;
       if (it.carried === undefined) it.carried = false; // 给了地点即视为非随身
-    }
-  }
-}
-
-/**
- * 把 delta 里的随行/所在地信息施加到 NPC 上(仅在 delta 明确给了才覆盖,last-write-wins)。
- * follow=true 时清掉 location(随行 NPC 无固定所在地);follow=false 时保留/采用 location。
- * 与物品 applyPlacement 同构(carried↔follow)。
- */
-function applyNpcPlacement(n: { follow?: boolean; location?: string }, src: NpcDelta): void {
-  if (typeof src.follow === 'boolean') {
-    n.follow = src.follow;
-    if (src.follow) n.location = undefined; // 随行 → 无固定所在地
-  }
-  if (typeof src.location === 'string') {
-    const loc = src.location.trim();
-    if (loc) {
-      n.location = loc;
-      if (n.follow === undefined) n.follow = false; // 给了所在地即视为定点
     }
   }
 }
@@ -2004,10 +1987,11 @@ export function editNpc(
   const desc = patch.desc?.trim() || undefined;
   const personality = patch.personality?.trim() || undefined;
 
-  // 位置 / 即时层:patch 明确给了用 patch 的;否则从旧 NPC 继承(改名不丢所在地/随行/状态/重要性)
+  // 位置 / 即时层:patch 明确给了用 patch 的;否则从旧 NPC 继承(改名不丢所在地/随行/状态/重要性)。
+  // location 保留空字符串(用户清空输入=所在不明),不能像旧逻辑那样被洗成 undefined 而清不掉。
   const prev = findNpc(memory.npcs, oldName);
   const follow = patch.follow !== undefined ? patch.follow : prev?.follow;
-  const location = patch.location !== undefined ? (patch.location.trim() || undefined) : prev?.location;
+  const location = patch.location !== undefined ? patch.location.trim() : (prev?.location ?? '');
   const outfit = patch.outfit !== undefined ? (patch.outfit.trim() || undefined) : prev?.outfit;
   const condition = patch.condition !== undefined ? (patch.condition.trim() || undefined) : prev?.condition;
   const important = patch.important !== undefined ? patch.important : prev?.important;

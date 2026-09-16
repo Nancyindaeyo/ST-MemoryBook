@@ -5,7 +5,7 @@ import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
 import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@/st/context';
 import { toast } from '@/st/toast';
-import { addSummary, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafBodyHash, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
+import { addSummary, classifyNpcPresence, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafBodyHash, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
 import { filterSummaryFeedIndices, summaryFeedNote } from './summaryFeed';
 import { extractJsonObject } from './json';
 import { cleanExactQuotes } from './quotes';
@@ -1243,6 +1243,8 @@ async function summarizeFloorWork(
       ties: n.ties, title: n.title, personality: n.personality, important: n.important,
       outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location,
       aliases: n.aliases, visibility: n.visibility, lockedFields: n.lockedFields,
+      // 在场标记按「本楼之前」的状态算,要 AI 逐个对照做离场/归场对账(与注入端同一权威判定)
+      presence: classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath),
     })),
     openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime, visibility: p.visibility })),
     // 近期已完成计划:与注入端同口径,截止点用本楼之前的状态(不泄漏未来)

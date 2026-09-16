@@ -4,7 +4,7 @@ import * as settings from '@/api/settings';
 import * as context from '@/st/context';
 import type { STContext, STMessage } from '@/st/context';
 import * as notices from '@/st/toast';
-import { deriveMemory, editLeafFull, editNpc, finalizeDelta, upsertNpc } from './apply';
+import { classifyNpcPresence, deriveMemory, editLeafFull, editNpc, finalizeDelta, setNpcFollow, upsertNpc } from './apply';
 import { createNewChatWithCarryover } from './carryover';
 import { currentSummaryPromise, summarizeFloor } from './engine';
 import * as inject from './inject';
@@ -47,6 +47,7 @@ beforeEach(() => {
   Object.assign(memory, createEmptyMemory());
   settings.apiSettings.summaryOnlyMode = false;
   settings.apiSettings.injection.npcs = true;
+  settings.apiSettings.injection.npcAffinity = true;
   settings.apiSettings.injection.scenes = true;
   settings.apiSettings.prompts.summary = '';
   settings.apiSettings.vector.enabled = false;
@@ -181,6 +182,93 @@ describe('独立、绝对覆盖、可回滚的角色补丁', () => {
   });
 });
 
+describe('离场同步与在场对账', () => {
+  const sceneLeaf = () => message({
+    location: '房间', locationPath: ['城', '客栈', '房间'],
+    scenes: { add: [{ path: ['城'], desc: '城市' }, { path: ['城', '客栈'], desc: '客栈' }, { path: ['城', '客栈', '房间'], desc: '房间' }, { path: ['城', '客栈', '厨房'], desc: '厨房' }] },
+    npcs: { add: [
+      { name: '厨师', location: '厨房' },
+      { name: '同伴', follow: true },
+      { name: '远客', location: '远方' },
+    ] },
+  });
+  const at = (mem: ReturnType<typeof deriveMemory>, n: string) => mem.npcs.find(x => x.name === n)!;
+
+  it('空字符串清掉旧地点(所在不明),不再判在场;JSON 往返保留清空语义', () => {
+    const delta = finalizeDelta({ npcs: { update: [{ name: '厨师', follow: false, location: '' }] } }, []);
+    const chat = [sceneLeaf(), message(JSON.parse(JSON.stringify(delta)))];
+    const mem = deriveMemory(chat);
+    expect(at(mem, '厨师')).toMatchObject({ follow: false });
+    expect(at(mem, '厨师').location).toBeUndefined();
+    expect(classifyNpcPresence(at(mem, '厨师'), mem.scenes, '房间', ['城', '客栈', '房间'])).toBe('absent');
+    // 对照:未清空的远客仍按地点判定为不在场,同伴恒在场
+    expect(classifyNpcPresence(at(mem, '远客'), mem.scenes, '房间', ['城', '客栈', '房间'])).toBe('absent');
+    expect(classifyNpcPresence(at(mem, '同伴'), mem.scenes, '房间', ['城', '客栈', '房间'])).toBe('present');
+    // 随行角色顺手写空 location(没有显式写 follow)不能取消随行:空串只清地点
+    const guard = deriveMemory([sceneLeaf(), message(JSON.parse(JSON.stringify(finalizeDelta({ npcs: { update: [{ name: '同伴', location: '' }] } }, []))))]);
+    expect(at(guard, '同伴').follow).toBe(true);
+    expect(at(guard, '同伴').location).toBeUndefined();
+    expect(classifyNpcPresence(at(guard, '同伴'), guard.scenes, '房间', ['城', '客栈', '房间'])).toBe('present');
+    // 要离队必须显式 follow:false;此时即便不带 location,原先随行时被清掉的地点也让它判不在场
+    const left = deriveMemory([sceneLeaf(), message({ npcs: { update: [{ name: '同伴', follow: false, location: '' }] } })]);
+    expect(classifyNpcPresence(at(left, '同伴'), left.scenes, '房间', ['城', '客栈', '房间'])).toBe('absent');
+    const leftNoLoc = deriveMemory([sceneLeaf(), message({ npcs: { update: [{ name: '同伴', follow: false }] } })]);
+    expect(classifyNpcPresence(at(leftNoLoc, '同伴'), leftNoLoc.scenes, '房间', ['城', '客栈', '房间'])).toBe('absent');
+    // 同一条补丁明确 follow:true 与空 location 同时出现时,随行优先(不能被空串反向取消)
+    const keep = deriveMemory([sceneLeaf(), message({ npcs: { update: [{ name: '厨师', follow: true, location: '' }] } })]);
+    expect(classifyNpcPresence(at(keep, '厨师'), keep.scenes, '房间', ['城', '客栈', '房间'])).toBe('present');
+  });
+  it('省略 location 保持旧值,不能把未提供当成清空', () => {
+    const chat = [sceneLeaf(), message({ npcs: { update: [{ name: '厨师', follow: false }] } })];
+    expect(at(deriveMemory(chat), '厨师').location).toBe('厨房');
+  });
+  it('手动编辑末尾空值=所在不明;改名继承所在地;取消随行不误清位置', () => {
+    const chat = [message(), message()];
+    useChat(chat);
+    expect(upsertNpc({ name, location: '客栈' })).toBe(true);
+    expect(memory.npcs[0].location).toBe('客栈');
+    expect(editNpc(name, { location: '' })).toBe(true);
+    expect(memory.npcs[0].location).toBeUndefined();
+    // 人工锁会锁住所在地,后续手动改地点要先解锁(摘要不能覆盖;用户改可以)
+    expect(editNpc(name, { location: '厨房', unlock: ['location'] })).toBe(true);
+    expect(editNpc(name, { name: '新名字' })).toBe(true);
+    expect(memory.npcs[0]).toMatchObject({ name: '新名字', location: '厨房' });
+    expect(setNpcFollow('新名字', false)).toBe(true);
+    expect(memory.npcs[0]).toMatchObject({ follow: false, location: '厨房' });
+    expect(editNpc('新名字', { location: '', unlock: ['location'] })).toBe(true);
+    expect(memory.npcs[0].location).toBeUndefined();
+  });
+  it('摘要名册按本楼之前的状态标在场,离场去向未明标所在不明', async () => {
+    const second = message();
+    delete second.extra!.bbs_leaf;
+    const chat = [sceneLeaf(), second];
+    useChat(chat);
+    vi.spyOn(client, 'requestViaMainApi').mockResolvedValue(JSON.stringify({
+      summary: '厨师离开房间但没说去哪。', timeStart: '2026/9/13 10:00', timeEnd: '2026/9/13 10:05',
+      npcs: { update: [{ name: '厨师', follow: false, location: '' }] },
+    }));
+    await summarizeFloor(1);
+    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].map(m => m.content).join('\n');
+    expect(material).toContain('厨师〔同区域〕'); // 厨师在厨房:相对主角当前节点(房间)是同区域
+    expect(material).toContain('同伴〔在场〕 [随行]');
+    expect(material).toContain('远客〔不在场〕');
+    expect(memory.npcs.find(n => n.name === '厨师')?.location).toBeUndefined();
+    expect(classifyNpcPresence(memory.npcs.find(n => n.name === '厨师')!, memory.scenes, '房间', ['城', '客栈', '房间'])).toBe('absent');
+  });
+});
+
+describe('名册在场标记渲染', () => {
+  it('有 presence 时渲染标签;缺省保持旧格式,不引入所在不明', () => {
+    const npc = { ...initial };
+    expect(fmtNpcSummaryList([{ ...npc, presence: 'present', follow: true }])).toContain('〔在场〕 [随行]');
+    expect(fmtNpcSummaryList([{ ...npc, presence: 'nearby', location: '厨房' }])).toContain('〔同区域〕 [在:厨房]');
+    expect(fmtNpcSummaryList([{ ...npc, presence: 'absent' }])).toContain('〔不在场〕 [所在不明]');
+    for (const mark of ['〔在场〕', '〔同区域〕', '〔不在场〕', '所在不明']) {
+      expect(fmtNpcSummaryList([npc])).not.toContain(mark);
+    }
+  });
+});
+
 const promptArgs: Parameters<typeof buildSummaryPrompt>[0] = {
   user: 'User', char: 'Character', time: '', location: '', protagonist: {}, sceneFocus: null,
   lifeDetails: [], items: [], itemLog: [], scenes: [], npcs: [initial], openPlans: [], resolvedPlans: [],
@@ -201,6 +289,8 @@ describe('摘要与主对话的提示词边界', () => {
       '两侧与说明均省略', '禁止增量', '禁止每轮升级修辞', '不要默认填 0', '不得把它抄入 summary/relation/ties/personality']) {
       expect(RULE_NPC_AFFINITY).toContain(contract);
     }
+    // 估计是过去的总结,不是上限:防止主模型把旧档位当禁令冻结关系发展
+    expect(NPC_AFFINITY_BRIEFING).toContain('不是对本轮的上限或禁令');
   });
   it('四档在场状态均注入独立好感,远处省略说明且守住角色视角', () => {
     const chat = [message({
@@ -222,6 +312,20 @@ describe('摘要与主对话的提示词边界', () => {
     expect(text).toContain('内心好感:强烈反感;外在态度:明显亲近、积极表达');
     expect(text).not.toContain('远处说明不应注入');
     expect(text).toContain('不代表主角或其他角色知情');
+  });
+  it('关闭「角色好感估计」后名册照发、好感不注入;摘要材料仍保留好感', () => {
+    useChat([base()]);
+    expect(inject.buildStateInjectionText()).toContain('好感估计');
+    settings.apiSettings.injection.npcAffinity = false;
+    const text = inject.buildStateInjectionText();
+    expect(text).toContain('NPC名册');
+    expect(text).toContain(name);
+    expect(text).not.toContain('好感');
+    expect(text).not.toContain('五档定性估计');
+    // 副 API 摘要名册不受该开关影响:记录始终照常
+    expect(buildSummaryPrompt(promptArgs).user).toContain('对主角的好感与态度估计[');
+    settings.apiSettings.injection.npcAffinity = true;
+    expect(inject.buildStateInjectionText()).toContain('好感估计');
   });
   it('旧角色无好感记录时零额外注入,关闭注入/纯摘要模式仍有效', () => {
     useChat([message({ npcs: { add: [{ name }] } })]);

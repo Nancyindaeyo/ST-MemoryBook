@@ -174,6 +174,12 @@ export interface NpcAffinity {
 }
 
 /**
+ * NPC 相对主角当前场景的在场地分档(判定逻辑见 apply.classifyNpcPresence 单一权威)。
+ * 摘要名册的在场标记、主对话注入分档、NPC 页分组共用同一套词汇。
+ */
+export type NpcPresence = 'present' | 'nearby' | 'absent';
+
+/**
  * NPC / 角色(派生产物,不持久化)。
  * 与物品(MemItem)同构:确定性 id `npc:${规范化名}`,重放幂等、手动 op 可稳定引用。
  * 省 token 机制类比物品的 carried/location:
@@ -219,7 +225,7 @@ export interface MemNpc extends NpcAffinity {
   important?: boolean;
   /** 是否随行(随主角移动);省略/false=定点(按 location 匹配),true=同伴,永远在场 */
   follow?: boolean;
-  /** 定点时的所在地(故事内地名);follow≠true 时用于与当前地点匹配 */
+  /** 定点时的所在地(故事内地名);follow≠true 时用于与当前地点匹配。空=所在不明(离场且去向未明) */
   location?: string;
   /**
    * 同一人的其他称呼(昵称/化名/译名)。查找与提及匹配都认这些名字,
@@ -565,7 +571,10 @@ export interface NpcDelta extends NpcAffinity {
   important?: boolean;
   /** 是否随行(随主角移动)。省略=定点;明确随主角同行的同伴填 true */
   follow?: boolean;
-  /** 定点时的所在地(故事内地名) */
+  /**
+   * 定点时的所在地(故事内地名)。空字符串=所在不明:角色已离开当前场景但去向未写明,
+   * 清掉旧地点、不再视为在场;之后说明去向时再填新地点。
+   */
   location?: string;
   /** 同一人的其他称呼;update 时与已有别名合并 */
   aliases?: string[];

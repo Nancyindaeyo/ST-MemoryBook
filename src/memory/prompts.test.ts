@@ -14,10 +14,12 @@ import {
   RULE_ITEMS,
   RULE_NPCS,
   RULE_PLANS,
+  RULE_RELATION_MOMENTUM,
   RULE_SCENES,
   RULE_SCENE_FOCUS,
   RULE_SUMMARY_COMPOSITION,
   RULE_SUMMARY_WRITE,
+  MEMORY_BRIEFING_END,
   SUMMARY_PROMPT,
   SUMMARY_FACT_PREPARATION,
   SUMMARY_FACT_VERIFICATION,
@@ -97,6 +99,19 @@ describe('summary composition contract', () => {
     for (const checklist of [THINKING_CHECKLIST, buildBatchThinking(2).checklist, RESUMMARY_THINKING_CHECKLIST]) {
       expect(checklist).not.toContain(RULE_SUMMARY_COMPOSITION);
     }
+  });
+
+  it('requires cutting off by omission instead of boundary narration', () => {
+    for (const rule of [
+      '截断靠"不写"、不靠"声明"',
+      '以最后一个具体动作/对话自然收尾',
+      '指代材料的词',
+      '交代材料边界或未发生内容的句子收尾',
+    ]) {
+      expect(RULE_SUMMARY_WRITE).toContain(rule);
+    }
+    expect(RULE_SUMMARY_WRITE).not.toContain('原文未写出');
+    expect(SUMMARY_PROMPT).toContain('截断靠"不写"');
   });
 });
 
@@ -248,6 +263,50 @@ describe('summary fact workflow', () => {
     ]) {
       expect(THINKING_CHECKLIST).toContain(rule);
     }
+  });
+});
+
+describe('relationship retention and departure protocol', () => {
+  it('keeps the relationship-momentum rule in every built-in and custom summary path', () => {
+    for (const text of [RULE_SUMMARY_WRITE, SUMMARY_PROMPT, RESUMMARY_PROMPT, RESUMMARY2_PROMPT]) {
+      expect(text).toContain('【关系线保留】');
+    }
+    for (const contract of ['手搭在他手边', '自X起', '重复的亲密互动/调情', '关系有所变化', '证据边界不变']) {
+      expect(RULE_RELATION_MOMENTUM).toContain(contract);
+    }
+    apiSettings.prompts.summary = 'CUSTOM {{content}}';
+    expect(buildSummaryPrompt(args).system).toContain(RULE_RELATION_MOMENTUM);
+    for (const level of [1, 2] as const) {
+      Object.assign(apiSettings.prompts, { resummary: '', resummary2: '' });
+      if (level === 1) apiSettings.prompts.resummary = 'CUSTOM {{content}}';
+      else apiSettings.prompts.resummary2 = 'CUSTOM {{content}}';
+      expect(buildResummaryPrompt({ ...args, level }).system).toContain(RULE_RELATION_MOMENTUM);
+    }
+  });
+
+  it('no longer treats intimacy or flirting as deletable repeated process when it forms a trend', () => {
+    expect(RESUMMARY_PROMPT).toContain('关系线(与上面同优');
+    expect(RESUMMARY2_PROMPT).toContain('承载关系推进/退缩的亲密互动与调情');
+    expect(RESUMMARY2_PROMPT).not.toContain('购物、换衣、调情等过程');
+    expect(RESUMMARY_THINKING_CHECKLIST).toContain('关系线保留');
+    expect(THINKING_CHECKLIST).toContain('关系线保留');
+  });
+
+  it('ships the departure protocol: presence markers, unknown whereabouts and sceneFocus reconciliation', () => {
+    for (const contract of ['〔在场〕/〔同区域〕/〔不在场〕', '在场对账', '所在不明', 'location 填空字符串', 'sceneFocus.participants 改成与实际在场名单一致']) {
+      expect(RULE_NPCS).toContain(contract);
+    }
+    expect(SUMMARY_PROMPT).toContain('按**本楼开始前**的状态算好');
+    expect(SUMMARY_PROMPT).toContain('离场去向未明填空字符串');
+    expect(SUMMARY_PROMPT).toContain('同步修正 participants');
+    expect(THINKING_CHECKLIST).toContain('在场对账');
+    expect(THINKING_CHECKLIST).toContain('所在不明');
+  });
+
+  it('frames the briefing as past-only context that does not cap relationships or set prose style', () => {
+    expect(MEMORY_BRIEFING_END).toContain('不是上限');
+    expect(MEMORY_BRIEFING_END).toContain('继续发展或转折');
+    expect(MEMORY_BRIEFING_END).toContain('不代表正文文风');
   });
 });
 

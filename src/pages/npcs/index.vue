@@ -877,8 +877,8 @@ function confirmRemove() {
           <span class="bbs-modal-label">随行同伴(跟随主角移动,永远在场)</span>
         </label>
         <label v-if="!draft.follow" class="bbs-modal-field">
-          <span class="bbs-modal-label">所在地点</span>
-          <textarea v-model="draft.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈、王宫"></textarea>
+          <span class="bbs-modal-label">所在地点(留空=所在不明,不再视为在场)</span>
+          <textarea v-model="draft.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈、王宫;留空=所在不明"></textarea>
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="closeComposer">取消</button>
@@ -988,8 +988,8 @@ function confirmRemove() {
           <span class="bbs-modal-label">随行同伴(跟随主角移动,永远在场)</span>
         </label>
         <label v-if="!editing.follow" class="bbs-modal-field">
-          <span class="bbs-modal-label">所在地点</span>
-          <textarea v-model="editing.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈、王宫"></textarea>
+          <span class="bbs-modal-label">所在地点(留空=所在不明,不再视为在场)</span>
+          <textarea v-model="editing.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈、王宫;留空=所在不明"></textarea>
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
