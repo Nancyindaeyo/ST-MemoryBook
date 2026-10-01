@@ -147,9 +147,6 @@ export function buildRequestBody(
     stream,
     // 不用工具:见函数头注释,防第三方 fetch 拦截器把摘要改写成工具调用
     tool_choice: 'none',
-    // 静默:不影响主对话状态
-    presence_penalty: 0,
-    frequency_penalty: 0,
   };
 
   const body: Record<string, unknown> = effort
@@ -177,6 +174,26 @@ export function buildRequestBody(
   return body;
 }
 
+/**
+ * 关闭预填充时整理成 Gemini 能接受的消息序。
+ *
+ * 摘要请求的思考清单是一条 system,排在 user 后面,末尾再跟一条 assistant 预填充。
+ * Gemini 3 不续写预填充,并且拒绝「user 之后再出现 system」或连续的 user 轮,直接 400。
+ * 关掉预填充时:丢掉末尾 assistant,并把所有 system(含思考清单)挪到最前,让请求以 user 结束。
+ * 清单内容仍会发给模型。预填充开着时保持原顺序,Claude 等后端继续从末尾 assistant 续写。
+ */
+export function messagesWithoutPrefill(messages: ChatMsg[]): ChatMsg[] {
+  const trimmed =
+    messages[messages.length - 1]?.role === 'assistant' ? messages.slice(0, -1) : messages;
+  const systems: ChatMsg[] = [];
+  const rest: ChatMsg[] = [];
+  for (const message of trimmed) {
+    if (message.role === 'system') systems.push(message);
+    else rest.push(message);
+  }
+  return [...systems, ...rest];
+}
+
 async function requestCompletionAtUrl(
   channel: ApiChannel,
   messages: ChatMsg[],
@@ -188,13 +205,9 @@ async function requestCompletionAtUrl(
   if (!channel.url || !channel.model) throw new ApiError('副 API 渠道未配置完整(缺 url 或 model)');
 
   const stream = channel.stream ?? false;
-  // 预填充开关(默认开):关闭时丢掉末尾那条 assistant 预填充消息。
-  // 摘要/批量请求会在末尾追加一条 assistant 预填充引导思维链;对不支持预填充(不续写)的端点
-  // 形同浪费、个别端点还要求「最后一条须为 user」。关掉只是不发它,思维链引导仍由 system 清单承担。
-  const outMessages =
-    channel.prefill === false && messages[messages.length - 1]?.role === 'assistant'
-      ? messages.slice(0, -1)
-      : messages;
+  // 模型名里带 gemini 时也收成无预填充:Gemini 3 不续写,开着预填充一样 400。
+  const dropPrefill = channel.prefill === false || /gemini/i.test(channel.model);
+  const outMessages = dropPrefill ? messagesWithoutPrefill(messages) : messages;
   const body = buildRequestBody(channel, outMessages, reverseProxy, stream);
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);
@@ -306,10 +319,31 @@ export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOption
     throw new ApiError('当前 ST 版本不支持 generateRaw,无法跟随主 API');
   }
   if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const content = (await ctx.generateRaw({ prompt: messages, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
+  // 跟随主 API 没有渠道上的预填充开关。主界面当前是 Gemini 时同样收成「system 在前、以 user 结束」,
+  // 否则 generateRaw 会把 assistant 预填充原样送出,TT 把 Gemini 的 400 包成 quiet 请求的 502。
+  const prompt = mainApiRejectsPrefill() ? messagesWithoutPrefill(messages) : messages;
+  const content = (await ctx.generateRaw({ prompt, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
   if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   if (!content) throw new ApiError('主 API 返回空内容');
   return content;
+}
+
+/** 主界面当前模型是 Gemini(MakerSuite / Vertex,或模型名里带 gemini)时不能发 assistant 预填充。 */
+export function mainApiRejectsPrefill(): boolean {
+  const settings = getContext()?.chatCompletionSettings;
+  if (!settings) return false;
+  const source = String(settings.chat_completion_source ?? '').toLowerCase();
+  if (source === 'makersuite' || source === 'vertexai') return true;
+  const model = [
+    settings.google_model,
+    settings.vertexai_model,
+    settings.openai_model,
+    settings.custom_model,
+    settings.openrouter_model,
+  ]
+    .map(value => String(value ?? ''))
+    .join('\n');
+  return /gemini/i.test(model);
 }
 
 /** 连通性测试:发一条极短请求 */

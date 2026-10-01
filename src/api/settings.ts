@@ -30,9 +30,9 @@ export interface ApiChannel {
   stream: boolean;
   /**
    * 发送预填充(默认开)。摘要/批量请求末尾带一条 assistant 预填充消息,引导模型从思维链续写、
-   * 并压制拒答。Claude 等原生支持预填充的后端收益明显;若端点要求「最后一条必须是 user」
-   * 或为纯 OpenAI 端点(预填充不被续写、形同浪费),可关掉——关掉只是不发那条尾 assistant,
-   * 思维链引导仍由 system 检查清单承担,不影响功能。 */
+   * 并压制拒答。Claude 等原生支持预填充的后端收益明显。
+   * Gemini 等不续写预填充的端点会因此 400:关掉后不发末尾 assistant,并把排在 user 后面的
+   * 思考清单挪回所有 system 的最前,请求以 user 结束。清单内容仍会发送。 */
   prefill: boolean;
   /** 排除参数:这些字段名会在构造请求体时从 body 中删除,
    *  用于规避不接受某些参数(如 temperature/max_tokens)的兼容端点报错。 */

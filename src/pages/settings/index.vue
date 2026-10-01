@@ -1820,7 +1820,7 @@ function exportPublicApiDocument() {
           <span class="bbs-modal-label">发送预填充</span>
           <input v-model="editingChannel.prefill" type="checkbox" class="bbs-checkbox" />
         </label>
-        <span class="bbs-field-hint">默认开。若副 API 报错信息里出现 prefill 字样,关掉它即可。</span>
+        <span class="bbs-field-hint">默认开。Gemini 等不支持预填充的模型请关闭:会去掉末尾的 assistant,并把思考清单挪到用户消息之前。</span>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">排除参数</span>
           <input

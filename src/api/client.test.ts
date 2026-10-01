@@ -3,7 +3,7 @@ import type { ApiChannel } from '@/api/settings';
 import * as context from '@/st/context';
 import type { STContext } from '@/st/context';
 import { RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL } from '@/memory/prompts';
-import { buildRequestBody, requestCompletion } from './client';
+import { buildRequestBody, mainApiRejectsPrefill, messagesWithoutPrefill, requestCompletion, requestViaMainApi } from './client';
 
 const channel: ApiChannel = {
   id: 'ch1',
@@ -36,9 +36,11 @@ describe('buildRequestBody:思考强度与两条源分支', () => {
       max_tokens: 1024,
       stream: false,
       tool_choice: 'none',
-      presence_penalty: 0,
-      frequency_penalty: 0,
     });
+    // 不发 presence/frequency_penalty:二者恒为 0,对 OpenAI 等于默认值,
+    // 但 Gemini 的 OpenAI 兼容接口会把未知字段当成 400。
+    expect(build().presence_penalty).toBeUndefined();
+    expect(build().frequency_penalty).toBeUndefined();
   });
 
   it('两条源分支都带 tool_choice:none(给防截断类 fetch 拦截器的放行握手)', () => {
@@ -120,9 +122,74 @@ describe('visible compression audit transport', () => {
 
     expect(await requestCompletion({ ...channel, prefill, stream }, messages)).toBe(raw);
     const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-    expect(body.messages).toEqual(prefill ? messages : messages.slice(0, -1));
+    const withoutPrefill = messagesWithoutPrefill(messages);
+    expect(body.messages).toEqual(prefill ? messages : withoutPrefill);
     expect(body.messages[0]).toEqual(messages[0]);
     expect(body.messages).toContainEqual({ role: 'system', content: RESUMMARY_THINKING_CHECKLIST });
+    if (!prefill) {
+      expect(body.messages.at(-1)?.role).toBe('user');
+      expect(body.messages.findIndex((m: { role: string }) => m.role === 'user')).toBeGreaterThan(
+        body.messages.findIndex((m: { content: string }) => m.content === RESUMMARY_THINKING_CHECKLIST),
+      );
+    }
     expect(messages).toHaveLength(4);
+  });
+
+  it('drops prefill for a gemini model even when the switch is still on', async () => {
+    vi.spyOn(context, 'getContext').mockReturnValue({
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    } as unknown as STContext);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ choices: [{ message: { content: 'ok' } }] }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const messages = [
+      { role: 'system' as const, content: 'rules' },
+      { role: 'user' as const, content: 'source' },
+      { role: 'system' as const, content: RESUMMARY_THINKING_CHECKLIST },
+      { role: 'assistant' as const, content: RESUMMARY_THINKING_PREFILL },
+    ];
+    await requestCompletion({ ...channel, model: 'gemini-3.8-flash', prefill: true }, messages);
+    const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+    expect(body.messages).toEqual(messagesWithoutPrefill(messages));
+    expect(body.messages.at(-1)).toEqual({ role: 'user', content: 'source' });
+  });
+});
+
+describe('main API gemini prefill', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('recognizes MakerSuite and gemini model names', () => {
+    vi.spyOn(context, 'getContext').mockReturnValue({
+      chatCompletionSettings: { chat_completion_source: 'makersuite', google_model: 'gemini-3.8-flash' },
+    } as unknown as STContext);
+    expect(mainApiRejectsPrefill()).toBe(true);
+
+    vi.spyOn(context, 'getContext').mockReturnValue({
+      chatCompletionSettings: { chat_completion_source: 'claude', claude_model: 'claude-sonnet' },
+    } as unknown as STContext);
+    expect(mainApiRejectsPrefill()).toBe(false);
+  });
+
+  it('strips the trailing assistant prefill before generateRaw when the main API is Gemini', async () => {
+    const generateRaw = vi.fn().mockResolvedValue('{"summary":"ok"}');
+    vi.spyOn(context, 'getContext').mockReturnValue({
+      generateRaw,
+      chatCompletionSettings: { chat_completion_source: 'openai', custom_model: 'gemini-3.8-flash' },
+    } as unknown as STContext);
+    const messages = [
+      { role: 'system' as const, content: 'rules' },
+      { role: 'user' as const, content: 'source' },
+      { role: 'system' as const, content: 'checklist' },
+      { role: 'assistant' as const, content: '<thinking>' },
+    ];
+    await requestViaMainApi(messages);
+    expect(generateRaw).toHaveBeenCalledWith({
+      prompt: messagesWithoutPrefill(messages),
+      responseLength: 65535,
+    });
   });
 });
