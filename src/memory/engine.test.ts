@@ -4,7 +4,7 @@ import * as settings from '@/api/settings';
 import * as context from '@/st/context';
 import type { STContext, STMessage } from '@/st/context';
 import * as notices from '@/st/toast';
-import { batchBackfill, checkResummary, currentSummaryPromise, handleGenerationIntercept, openingPendingFloor, planBatches, summarizeFloor, summarizeSelected } from './engine';
+import { batchBackfill, checkResummary, currentSummaryPromise, engineState, handleGenerationIntercept, openingPendingFloor, planBatches, summarizeFloor, summarizeQueue, summarizeSelected } from './engine';
 import { buildBatchThinking, buildResummaryPrompt, buildSummaryThinking, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, RULE_SUMMARY_COMPOSITION, SUMMARY_OUTPUT_PROTOCOL } from './prompts';
 import { renderSourceHints, SOURCE_HINTS_HEADER } from './sourceHints';
 import { markMemorySessionLoaded } from './session';
@@ -431,6 +431,80 @@ describe('summary request roles', () => {
     expect(second).not.toContain('[M2-P1]');
     expect([chat[1], chat[3]].map(m => m.mes)).toEqual(bodies);
     expect([chat[1], chat[3]].map(m => m.extra?.bbs_leaf?.text)).toEqual(floors.map(f => f.summary));
+  });
+});
+
+describe('summarizeQueue', () => {
+  const original = {
+    leafBatchThreshold: settings.apiSettings.leafBatchThreshold,
+    leafKeepRecent: settings.apiSettings.leafKeepRecent,
+    resummaryThreshold: settings.apiSettings.resummaryThreshold,
+    higherResummaryThreshold: settings.apiSettings.higherResummaryThreshold,
+    summaryMaxRetries: settings.apiSettings.summaryMaxRetries,
+  };
+  const channel = {
+    id: 'sub', name: '副', url: 'https://api.example.com/v1', key: 'k', model: 'm',
+    temperature: 1, maxTokens: 100, timeoutSec: 30, stream: false, prefill: false,
+    excludeParams: [] as string[], reasoningEffort: '',
+  };
+
+  beforeEach(() => {
+    Object.assign(settings.apiSettings, {
+      leafBatchThreshold: 2,
+      leafKeepRecent: 0,
+      resummaryThreshold: 2,
+      higherResummaryThreshold: 2,
+      summaryMaxRetries: 0,
+    });
+  });
+
+  afterEach(() => {
+    Object.assign(settings.apiSettings, original);
+  });
+
+  it('summarizes floors serially on the summary channel, then compresses L1 and L2 on the main API', async () => {
+    const chat = [0, 1, 2, 3].map(index => message(false, { mes: `Floor ${index}.` }));
+    useChat(chat);
+    vi.spyOn(settings, 'getChannelForTask').mockImplementation(task => (task === 'summary' ? channel : null));
+    let leafNo = 0;
+    let compressedNo = 0;
+    const summarySend = vi.spyOn(client, 'requestCompletion').mockImplementation(async () => JSON.stringify({
+      ...summary,
+      summary: `Leaf ${++leafNo}.`,
+    }));
+    vi.mocked(client.requestViaMainApi).mockImplementation(async () => JSON.stringify({
+      summary: `Compressed ${++compressedNo}.`,
+    }));
+
+    const result = await summarizeQueue();
+
+    expect(result).toMatchObject({ summarized: 4, compressed: 3, stopped: false, cancelled: false });
+    expect(summarySend).toHaveBeenCalledTimes(4);
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(3);
+    expect(chat.map(m => m.extra?.bbs_leaf?.text)).toEqual(['Leaf 1.', 'Leaf 2.', 'Leaf 3.', 'Leaf 4.']);
+    expect(memory.summaries.map(s => s.level)).toEqual([1, 1, 2]);
+    expect(engineState.lastError).toBe('');
+  });
+
+  it('stops after the configured retries and does not summarize later floors or compress', async () => {
+    const chat = [message(false, { mes: 'First.' }), message(false, { mes: 'Second.' })];
+    useChat(chat);
+    settings.apiSettings.summaryMaxRetries = 1;
+    vi.spyOn(settings, 'getChannelForTask').mockImplementation(task => (task === 'summary' ? channel : null));
+    const summarySend = vi.spyOn(client, 'requestCompletion')
+      .mockResolvedValueOnce(JSON.stringify({ ...summary, summary: 'Leaf 1.' }))
+      .mockRejectedValue(new Error('副 API 请求失败 (502)'));
+
+    const result = await summarizeQueue();
+
+    expect(result).toMatchObject({ summarized: 1, compressed: 0, stopped: true });
+    // 首楼 1 次成功;次楼首试 + 1 次重试,然后停
+    expect(summarySend).toHaveBeenCalledTimes(3);
+    expect(client.requestViaMainApi).not.toHaveBeenCalled();
+    expect(chat[0].extra?.bbs_leaf?.text).toBe('Leaf 1.');
+    expect(chat[1].extra?.bbs_leaf).toBeUndefined();
+    expect(engineState.lastError).toContain('502');
+    expect(memory.summaries).toHaveLength(0);
   });
 });
 

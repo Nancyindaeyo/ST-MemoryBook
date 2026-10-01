@@ -78,6 +78,24 @@ export function cancelBatchBackfill(): void {
   if (batchState.running) batchState.cancelRequested = true;
 }
 
+/**
+ * 一键摘要队列(模块级单例)。先逐楼摘要,再按各层阈值串行总结。
+ * 关窗不取消;进度和取消按钮重开后仍在。
+ */
+export const summaryQueueState = reactive({
+  running: false,
+  cancelRequested: false,
+  /** 当前步骤,如「摘要 2/10」「总结 3 条」 */
+  label: '',
+  /** 正常结束或手动停下后的一句结果;失败时留空,错误走 engineState.lastError */
+  hint: '',
+});
+
+/** 请求取消一键摘要(当前这一步完成后停下,不打断进行中的请求)。 */
+export function cancelSummaryQueue(): void {
+  if (summaryQueueState.running) summaryQueueState.cancelRequested = true;
+}
+
 let busy = false;
 let busyOwnerSeq = 0;
 let activeBusyOwner = 0;
@@ -114,6 +132,9 @@ function detachInvalidatedWork(): void {
   floorBackfillState.chatId = '';
   batchState.running = false;
   batchState.cancelRequested = false;
+  summaryQueueState.running = false;
+  summaryQueueState.cancelRequested = false;
+  summaryQueueState.label = '';
   // 切聊天 / 切 Persona 会先作废会话再异步载入;窗口内必须立刻清掉上一会话的注入,避免旧记忆泄漏进新生成。
   clearInjection();
   clearRecallInjection();
@@ -1939,6 +1960,113 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
  * 与自动路径同一套阈值/连锁逻辑(checkResummary),但带 busy 互斥,
  * 避免与正在跑的摘要/总结撞车。返回新生成的总结条数(0 = 未达阈值,什么都没做)。
  */
+export interface SummaryQueueResult {
+  /** 本次新落叶的楼数 */
+  summarized: number;
+  /** 本次新生成的总结条数(含 L1/L2/L3) */
+  compressed: number;
+  /** 某一步用完重试后仍失败,队列已停下 */
+  stopped: boolean;
+  /** 用户取消,停在步骤边界 */
+  cancelled: boolean;
+}
+
+/**
+ * 一键摘要:串行队列。
+ * 1. 待摘 AI 楼由旧到新逐楼摘要(摘要渠道,未指派则跟随主 API)。一步一请求,不打包。
+ * 2. 叶子补完后,按「每次总结条数 / 二次总结条数 / 更高层条数」和「保留最近叶子」
+ *    反复向上总结,直到没有任何一层达到阈值。总结走总结渠道。
+ * 每一步的重试次数都是设置里的 summaryMaxRetries。重试耗尽仍失败则停下,
+ * 不再摘后续楼,也不再压更高层。已成功的叶子和总结保留。
+ */
+export async function summarizeQueue(): Promise<SummaryQueueResult> {
+  const empty: SummaryQueueResult = { summarized: 0, compressed: 0, stopped: false, cancelled: false };
+  if (!engineActiveHere() || busy) return empty;
+  const ctx = getContext();
+  if (!ctx) return empty;
+  const chat = ctx.chat ?? [];
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    return empty;
+  }
+  const sender = resolveSender('summary', operation.signal);
+  if ('error' in sender) {
+    operation.dispose();
+    engineState.lastError = sender.error;
+    summaryQueueState.hint = '';
+    return { ...empty, stopped: true };
+  }
+
+  const floors = pendingAiFloors(chat);
+  const busyOwner = beginBusyWork();
+  engineState.lastError = '';
+  summaryQueueState.running = true;
+  summaryQueueState.cancelRequested = false;
+  summaryQueueState.hint = '';
+  summaryQueueState.label = floors.length ? `摘要 0/${floors.length}` : '检查总结阈值';
+  let summarized = 0;
+  let compressed = 0;
+  let stopped = false;
+  let cancelled = false;
+  const chatId = ctx.getCurrentChatId?.() ?? '';
+  try {
+    for (const floor of floors) {
+      if (summaryQueueState.cancelRequested) { cancelled = true; break; }
+      operation.assertCurrent();
+      if (!isAiFloor(chat[floor]) || leafValid(chat[floor])) continue;
+      floorBackfillState.running = true;
+      floorBackfillState.floor = floor;
+      floorBackfillState.chatId = chatId;
+      summaryQueueState.label = `摘要 ${summarized + 1}/${floors.length}`;
+      try {
+        await summarizeFloorWork(chat, floor, sender, {}, operation);
+        summarized += 1;
+      } catch (e) {
+        if (isStaleMemorySessionError(e) || operation.signal.aborted) throw e;
+        engineState.lastError = e instanceof Error ? e.message : String(e);
+        stopped = true;
+        break;
+      }
+    }
+    floorBackfillState.running = false;
+    floorBackfillState.floor = null;
+
+    // 叶子阶段失败或取消后不再向上总结:失败楼留着,已成功的保留。
+    while (!stopped && !cancelled && operation.isCurrent()) {
+      if (summaryQueueState.cancelRequested) { cancelled = true; break; }
+      summaryQueueState.label = compressed ? `总结 ${compressed} 条` : '检查总结阈值';
+      const made = await checkResummary();
+      compressed += made;
+      if (engineState.lastError) { stopped = true; break; }
+      if (made <= 0) break;
+      summaryQueueState.label = `总结 ${compressed} 条`;
+    }
+  } catch (e) {
+    if (!isStaleMemorySessionError(e) && !operation.signal.aborted) {
+      engineState.lastError = e instanceof Error ? e.message : String(e);
+      stopped = true;
+    }
+  } finally {
+    operation.dispose();
+    endBusyWork(busyOwner);
+    if (activeBusyOwner === busyOwner) {
+      summaryQueueState.running = false;
+      summaryQueueState.cancelRequested = false;
+      summaryQueueState.label = '';
+      floorBackfillState.running = false;
+      floorBackfillState.floor = null;
+      floorBackfillState.chatId = '';
+    }
+  }
+  if (operation.isCurrent()) await afterSummaryHideAndInject(chat);
+  if (stopped) summaryQueueState.hint = '';
+  else if (cancelled) summaryQueueState.hint = `已停止:摘要 ${summarized} 楼,总结 ${compressed} 条`;
+  else if (summarized || compressed) summaryQueueState.hint = `已摘要 ${summarized} 楼,生成 ${compressed} 条总结`;
+  else summaryQueueState.hint = '没有待摘要楼层,也没有达到总结阈值的节点';
+  return { summarized, compressed, stopped, cancelled };
+}
+
 export async function resummarizeNow(): Promise<number> {
   if (!engineActiveHere()) return 0;
   if (busy) return 0;

@@ -4,7 +4,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { addSummary, appendOpToLatestLeaf, deleteLeafAt, deleteSummary, deleteSummarySubtrees, editLeafAt, editPlan, editSummary, invalidateSummaryAncestors } from '@/memory/apply';
 import { apiSettings } from '@/api/settings';
-import { batchBackfill, batchState, cancelBatchBackfill, engineState, floorBackfillState, isAiFloor, resummarizeNow, summarizeFloor, summarizeSelected, syncHiddenNow } from '@/memory/engine';
+import { batchBackfill, batchState, cancelBatchBackfill, cancelSummaryQueue, engineState, floorBackfillState, isAiFloor, resummarizeNow, summarizeFloor, summarizeQueue, summarizeSelected, summaryQueueState, syncHiddenNow } from '@/memory/engine';
 import { estimateInjectionTokenBreakdown, refreshInjection, selectViewNodes, type ViewNode } from '@/memory/inject';
 import { compactTimeLabel, formatRange, splitTimeLabel } from '@/memory/timeTag';
 import { relativeTimeLabel, weekdayLabel } from '@/memory/timeRel';
@@ -243,6 +243,11 @@ function openBatchConfirm() {
   if (engineState.running || !pendingFloors.value.length) return;
   batchConfirmOpen.value = true;
 }
+function runSummaryQueue() {
+  if (engineState.running || summaryQueueState.running) return;
+  void summarizeQueue();
+}
+
 function runBatchBackfill() {
   batchConfirmOpen.value = false;
   if (engineState.running) return;
@@ -1042,6 +1047,24 @@ provide(SUMMARY_CTX, {
           <span class="bbs-btn-label">前情原文</span>
         </button>
         <button
+          v-if="!selectMode && !summaryQueueState.running"
+          class="bbs-btn bbs-btn-sm"
+          type="button"
+          :disabled="engineState.running"
+          title="逐楼串行摘要,再按总结阈值一直压到 L2/L3。某一步重试后仍失败就停下"
+          @click="runSummaryQueue"
+        >
+          <Icon name="summary" />
+          <span class="bbs-btn-label">一键摘要</span>
+        </button>
+        <span v-else-if="!selectMode" class="bbs-batch-progress">
+          <span class="bbs-pending-spin"></span>
+          {{ summaryQueueState.label || '摘要中' }}
+          <button class="bbs-batch-cancel" type="button" :disabled="summaryQueueState.cancelRequested" @click="cancelSummaryQueue">
+            {{ summaryQueueState.cancelRequested ? '停止中…' : '取消' }}
+          </button>
+        </span>
+        <button
           v-if="!selectMode"
           class="bbs-btn bbs-btn-sm bbs-resummary-btn"
           type="button"
@@ -1055,6 +1078,7 @@ provide(SUMMARY_CTX, {
         </button>
       </div>
     </div>
+    <p v-if="summaryQueueState.hint" class="bbs-resummary-hint">{{ summaryQueueState.hint }}</p>
     <p v-if="resummaryHint" class="bbs-resummary-hint">{{ resummaryHint }}</p>
     <p v-if="memory.rawPrequel?.text" class="bbs-resummary-hint">已存前情原文 {{ memory.rawPrequel.text.length }} 字,生成时按相关抽段,不改已有摘要。</p>
 
