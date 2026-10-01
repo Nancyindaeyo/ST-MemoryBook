@@ -28,6 +28,7 @@ import { cleanBody, compactTimeLabel, latestStoryTime, splitTimeLabel } from '..
 import { relativeTimeLabel } from '../timeRel';
 import { MEMORY_KEY } from '../types';
 import { normalizeRecallInjectionDepth } from './depth';
+import { noteFailure } from '../diagnostic';
 import { beginMemorySessionOperation, isStaleMemorySessionError } from '../session';
 import { RECALL_CACHE_STORAGE_KEY } from './cache';
 import {
@@ -241,39 +242,87 @@ function recallActiveHere(): boolean {
   return !!currentVectorDb() && recallScopes().length > 0;
 }
 
-/** 这种生成类型是否该触发召回:只在产出新正文的生成前召回。 */
+export interface RecallLine {
+  source: string;
+  preview: string;
+}
+
+export interface RecallRunResult {
+  ok: boolean;
+  text: string;
+  lines: RecallLine[];
+}
+
+export function emptyRecallResult(ok = true): RecallRunResult {
+  return { ok, text: '', lines: [] };
+}
+
+/** fresh=新用户消息要实算;reuse=续写/重生/翻页先试回执;skip=安静/扮演,清槽。 */
+export function recallTurn(type: string | undefined): 'fresh' | 'reuse' | 'skip' {
+  if (type === 'quiet' || type === 'impersonate') return 'skip';
+  if (type === 'continue' || type === 'regenerate' || type === 'swipe') return 'reuse';
+  return 'fresh';
+}
+
+/** 这种生成类型是否该准备召回。续写也算:有回执就复用,没有才实算。 */
 export function shouldRecallForType(type: string | undefined): boolean {
-  // 续写/安静/扮演不需要召回旧记忆(continue 接着写、quiet/impersonate 非剧情推进)
-  return type !== 'continue' && type !== 'quiet' && type !== 'impersonate';
+  return recallTurn(type) !== 'skip';
+}
+
+function linesFromRanked(
+  ranked: Array<{ leafId: string; document?: string | null }>,
+  tiers: Map<string, 'full' | 'brief'>,
+  selfScope: string | null,
+  hits: VecHit[],
+): RecallLine[] {
+  const byId = new Map(hits.map(hit => [hit.leafId, hit]));
+  const seen = new Set<string>();
+  const lines: RecallLine[] = [];
+  for (const hit of ranked) {
+    if (seen.has(hit.leafId) || !tiers.has(hit.leafId)) continue;
+    seen.add(hit.leafId);
+    const sourceHit = byId.get(hit.leafId);
+    lines.push({
+      source: sourceHit ? sourceLabel(sourceHit, selfScope) : '',
+      preview: previewOf(sourceHit?.document || hit.document),
+    });
+    if (lines.length >= 12) break;
+  }
+  return lines;
+}
+
+/** 把已算好的召回文本写进注入槽。空串等于清除。回执复用走这里,不再重算。 */
+export function applyVectorRecallText(text: string): void {
+  getContext()?.setExtensionPrompt?.(RECALL_INJECT_KEY, text, IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
 }
 
 /** 清空召回注入槽(降级/未命中/切聊天时)。 */
 export function clearRecallInjection(): void {
-  getContext()?.setExtensionPrompt?.(RECALL_INJECT_KEY, '', IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
+  applyVectorRecallText('');
 }
 
 /**
  * 执行一次阻塞召回并写注入槽。在生成拦截器放行路径里 await。
  * 任何失败都清空槽并返回(静默降级)。
  */
-export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
+export async function runVectorRecall(signal?: AbortSignal): Promise<RecallRunResult> {
   if (!recallActiveHere()) {
     clearRecallInjection();
-    return;
+    return emptyRecallResult();
   }
   const database = currentVectorDb();
-  if (!database) return;
+  if (!database) return emptyRecallResult();
 
   const ctx = getContext();
   const chat = ctx?.chat ?? [];
   const fn = ctx?.setExtensionPrompt;
-  if (typeof fn !== 'function' || !chat.length) return;
+  if (typeof fn !== 'function' || !chat.length) return emptyRecallResult();
 
   // 楼层还少 / 全在窗口内且无旧档:本回合无召回价值,跳过整条管线(清空注入槽,避免残留上次召回)。
   if (!recallWorthRunning(chat)) {
     setRecallStatus('未召回:楼层未达起召门槛或全在窗口内');
     clearRecallInjection();
-    return;
+    return emptyRecallResult();
   }
 
   const cfg = apiSettings.vector.recall;
@@ -286,7 +335,14 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     fn(RECALL_INJECT_KEY, cached.text, IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
     restoreRecallDebug(cached.debug);
     setRecallStatus(`${cached.debug.status}(复用缓存)`);
-    return;
+    return {
+      ok: true,
+      text: cached.text,
+      lines: cached.debug.rerank
+        .filter(hit => hit.tier === 'full' || hit.tier === 'brief')
+        .slice(0, 12)
+        .map(hit => ({ source: hit.source, preview: hit.preview })),
+    };
   }
 
   activeRecallAbort?.abort();
@@ -296,7 +352,7 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
   if (!operation.isCurrent()) {
     operation.dispose();
     if (activeRecallAbort === localAbort) activeRecallAbort = null;
-    return;
+    return emptyRecallResult(false);
   }
   const linkedAbort = linkAbortSignals([signal, localAbort.signal, operation.signal]);
   const taskSignal = linkedAbort.signal;
@@ -315,7 +371,7 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     if (!queryVectors.length) {
       setRecallStatus('未召回:没有可用的检索 query');
       clearRecallInjection();
-      return;
+      return emptyRecallResult();
     }
 
     // 2) 后端检索:多路在范围内纯按 embedding 得分取前 rerankCandidates(后端 max 融合,不套阈值),排除窗口内叶子
@@ -339,7 +395,7 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     if (!results.length) {
       setRecallStatus('未召回:检索无候选');
       clearRecallInjection();
-      return;
+      return emptyRecallResult();
     }
 
     // 3) rerank(用 INTENT/重写 query;渠道未配 → 降级:用 embedding 序,score 复用 similarity)
@@ -355,11 +411,25 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
     setRecallStatus(text ? '召回完成' : '召回完成:无内容达标,本回合未注入');
     // 实算成功才落缓存(失败/降级路径不缓存,下次重试)。存调试快照供命中时还原面板。
     if (cacheKey) saveRecallCache({ key: cacheKey, text, debug: snapshotRecallDebug() });
+    return {
+      ok: true,
+      text,
+      lines: linesFromRanked(ranked, tiers, selfScope, results),
+    };
   } catch (e) {
-    if (isStaleMemorySessionError(e) || operation.signal.aborted || localAbort.signal.aborted) return;
+    if (isStaleMemorySessionError(e) || operation.signal.aborted || localAbort.signal.aborted) return emptyRecallResult(false);
     console.warn('[柏宝书向量] 召回失败(降级为不召回):', e);
     setRecallStatus(`失败:${e instanceof Error ? e.message : String(e)}`);
+    const channel = resolveVectorModel('embedding');
+    noteFailure({
+      stage: '召回',
+      error: e,
+      retries: channel.retries | 0,
+      stream: null,
+      prefill: null,
+    });
     clearRecallInjection();
+    return emptyRecallResult(false);
   } finally {
     linkedAbort.dispose();
     operation.dispose();

@@ -1536,7 +1536,18 @@ function parseShortRef(ref: string): number | null {
  * 把 AI 返回的 SummaryDelta 固化成可持久化的 StoredDelta。
  * 关键:plans.resolve 的运行期短序号(p1/p2…)按 openPlansOrdered 翻译成**稳定 plan id**。
  */
-export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: string }[], lifeDetailsOrdered: { id: string }[] = []): StoredDelta {
+function noteShrink(notes: string[] | undefined, label: string, raw: unknown, kept: number): void {
+  if (!notes) return;
+  const input = arr(raw).length;
+  if (input > kept) notes.push(`${label} ${input - kept} 条`);
+}
+
+export function finalizeDelta(
+  delta: SummaryDelta,
+  openPlansOrdered: { id: string }[],
+  lifeDetailsOrdered: { id: string }[] = [],
+  notes?: string[],
+): StoredDelta {
   const out: StoredDelta = {};
   const time = optText(delta.time);
   const location = optText(delta.location);
@@ -1559,6 +1570,9 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
     const add = cleanItemList(delta.items.add);
     const update = cleanItemList(delta.items.update);
     const remove = cleanTextList(delta.items.remove, ['name', 'item', 'id']);
+    noteShrink(notes, '物品新增', delta.items.add, add.length);
+    noteShrink(notes, '物品更新', delta.items.update, update.length);
+    noteShrink(notes, '物品移除', delta.items.remove, remove.length);
     if (add.length) items.add = add;
     if (update.length) items.update = update;
     if (remove.length) items.remove = remove;
@@ -1571,6 +1585,9 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
     const add = cleanSceneList(delta.scenes.add);
     const update = cleanSceneList(delta.scenes.update);
     const reparent = cleanSceneReparentList(delta.scenes.reparent);
+    noteShrink(notes, '地点新增', delta.scenes.add, add.length);
+    noteShrink(notes, '地点更新', delta.scenes.update, update.length);
+    noteShrink(notes, '地点迁移', delta.scenes.reparent, reparent.length);
     if (add.length) scenes.add = add;
     if (update.length) scenes.update = update;
     if (reparent.length) scenes.reparent = reparent;
@@ -1584,6 +1601,10 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
     const update = cleanNpcList(delta.npcs.update).map(stripManualNpcLocks);
     const remove = cleanTextList(delta.npcs.remove, ['name', 'npc', 'id']);
     const merge = cleanNpcMergeList(delta.npcs.merge);
+    noteShrink(notes, '人物新增', delta.npcs.add, add.length);
+    noteShrink(notes, '人物更新', delta.npcs.update, update.length);
+    noteShrink(notes, '人物移除', delta.npcs.remove, remove.length);
+    noteShrink(notes, '人物合并', delta.npcs.merge, merge.length);
     if (add.length) npcs.add = add;
     if (update.length) npcs.update = update;
     if (remove.length) npcs.remove = remove;
@@ -1594,9 +1615,10 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
   if (isRecord(delta.plans)) {
     const plans: NonNullable<StoredDelta['plans']> = {};
     const add = cleanPlanAddList(delta.plans.add);
+    noteShrink(notes, '计划', delta.plans.add, add.length);
     if (add.length) plans.add = add;
     if (arr(delta.plans.resolve).length) {
-      const out: PlanResolveItem[] = [];
+      const resolved: PlanResolveItem[] = [];
       for (const ref of arr(delta.plans.resolve)) {
         // 短序号可能是裸字符串 "p2" 或带结局的对象 { id:"p2", outcome, reason }
         const shortRef = namedText(ref, ['id', 'ref', 'planId']);
@@ -1605,16 +1627,17 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
         const target = openPlansOrdered[n - 1];
         if (!target) continue;
         if (!isRecord(ref)) {
-          out.push(target.id); // 旧格式:只翻译成稳定 id
+          resolved.push(target.id); // 旧格式:只翻译成稳定 id
         } else {
           const entry: PlanResolveItem = { id: target.id };
           if (ref.outcome === 'done' || ref.outcome === 'cancelled' || ref.outcome === 'failed') entry.outcome = ref.outcome;
           const reason = optText(ref.reason);
           if (reason) entry.reason = reason;
-          out.push(entry);
+          resolved.push(entry);
         }
       }
-      if (out.length) plans.resolve = out;
+      noteShrink(notes, '计划了结', delta.plans.resolve, resolved.length);
+      if (resolved.length) plans.resolve = resolved;
     }
     if (Object.keys(plans).length) out.plans = plans;
   }
@@ -1632,6 +1655,7 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
     };
     const lifeDetails: NonNullable<StoredDelta['lifeDetails']> = {};
     const add = cleanLifeDetailAddList(delta.lifeDetails.add);
+    noteShrink(notes, '生活细节新增', delta.lifeDetails.add, add.length);
     if (add.length) lifeDetails.add = add;
     const update = cleanLifeDetailUpdateList(delta.lifeDetails.update)
       .map(u => {
@@ -1642,16 +1666,20 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
         return { ...rest, id };
       })
       .filter((u): u is LifeDetailUpdate & { tier?: 'pinned' | 'active' | 'archive' } => !!u);
+    noteShrink(notes, '生活细节更新', delta.lifeDetails.update, update.length);
     if (update.length) lifeDetails.update = update;
     const archive = arr(delta.lifeDetails.archive).map(resolveDetailRef).filter((x): x is string => !!x);
+    noteShrink(notes, '生活细节归档', delta.lifeDetails.archive, archive.length);
     if (archive.length) lifeDetails.archive = archive;
     const remove = arr(delta.lifeDetails.remove).map(resolveDetailRef).filter((x): x is string => !!x);
+    noteShrink(notes, '生活细节移除', delta.lifeDetails.remove, remove.length);
     if (remove.length) lifeDetails.remove = remove;
     if (Object.keys(lifeDetails).length) out.lifeDetails = lifeDetails;
   }
 
   if (Array.isArray(delta.vars) && delta.vars.length) {
     const ops = finalizeVarOps(delta.vars);
+    noteShrink(notes, '变量命令', delta.vars, ops.length);
     if (ops.length) out.varOps = ops;
   }
   return out;

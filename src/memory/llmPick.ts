@@ -24,6 +24,8 @@ import { npcNameList } from './npcIdentity';
 import { MEMORY_BRIEFING_END, MEMORY_BRIEFING_NOTE } from './prompts';
 import { derivedMeta, memory } from './store';
 import { normalizeRecallInjectionDepth } from './vector/depth';
+import { noteFailure } from './diagnostic';
+import type { RecallRunResult } from './vector/recall';
 import { beginMemorySessionOperation, isStaleMemorySessionError } from './session';
 
 const CATALOG_CAP = 40;
@@ -150,12 +152,12 @@ async function askLlmPick(
  * 生成前补充召回。关键词抽段始终可用;LLM 选题受设置开关控制。
  * 失败只清槽。
  */
-export async function runSupplementalRecall(): Promise<void> {
+export async function runSupplementalRecall(): Promise<RecallRunResult> {
   let operation: ReturnType<typeof beginMemorySessionOperation> | null = null;
   try {
     if (!engineActiveHere() || apiSettings.summaryOnlyMode) {
       clearLlmPickInjection();
-      return;
+      return { ok: true, text: '', lines: [] };
     }
     operation = beginMemorySessionOperation();
     operation.assertCurrent();
@@ -191,11 +193,31 @@ export async function runSupplementalRecall(): Promise<void> {
     }
 
     operation.assertCurrent();
-    writeLlmPickInjection(composeInjection(pickedLeaves, chunks, prequelIdx), pickDepth());
+    const text = composeInjection(pickedLeaves, chunks, prequelIdx);
+    writeLlmPickInjection(text, pickDepth());
+    const lines = [
+      ...pickedLeaves.map(leaf => ({
+        source: leaf.floor != null ? `#${leaf.floor}` : '叶子',
+        preview: clip(leaf.text, 80),
+      })),
+      ...prequelIdx
+        .filter(i => i >= 0 && i < chunks.length)
+        .map(i => ({ source: '前情', preview: clip(chunks[i], 80) })),
+    ];
+    return { ok: true, text, lines: lines.filter(line => line.preview).slice(0, 12) };
   } catch (e) {
-    if (isStaleMemorySessionError(e) || operation?.signal.aborted) return;
+    if (isStaleMemorySessionError(e) || operation?.signal.aborted) return { ok: false, text: '', lines: [] };
     console.warn('[柏宝书] 选材召回失败(清空槽,放行生成):', e);
+    const channel = getChannelForTask('summary');
+    noteFailure({
+      stage: '召回',
+      error: e,
+      retries: apiSettings.summaryMaxRetries | 0,
+      stream: channel ? channel.stream === true : null,
+      prefill: channel ? channel.prefill !== false : null,
+    });
     clearLlmPickInjection();
+    return { ok: false, text: '', lines: [] };
   } finally {
     operation?.dispose();
   }

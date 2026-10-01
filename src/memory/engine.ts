@@ -1,5 +1,5 @@
 import type { ChatMsg } from '@/api/client';
-import { mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
+import { ApiError, mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
 import { apiSettings, engineActiveHere, getChannelForTask } from '@/api/settings';
 import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
@@ -7,6 +7,7 @@ import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@
 import { toast } from '@/st/toast';
 import { addSummary, classifyNpcPresence, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafBodyHash, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
 import { filterSummaryFeedIndices, summaryFeedNote } from './summaryFeed';
+import { noteDrops, noteFailure, type DiagnosticStage } from './diagnostic';
 import { extractJsonObject } from './json';
 import { cleanExactQuotes } from './quotes';
 import {
@@ -19,7 +20,7 @@ import {
   type MemorySessionOperation,
 } from './session';
 import { clearInjection, clearLlmPickInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
+import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildDeltaRepairPrompt, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, recomputeDerived, scheduleLeafFlush } from './store';
@@ -775,6 +776,99 @@ export async function summarizeFloor(floor: number): Promise<void> {
  * 重摘保留叶子 id,避免后续计划引用失效;包含该叶子的上层总结会在落叶时失效移除。
  * 此操作只重做当前叶子,不额外触发上层总结请求。
  */
+/**
+ * 叙事已经留下、只有部分结构化字段不合法时,重问增量并写回同一片叶子。
+ * 不改摘要正文,重试次数仍是 summaryMaxRetries。整段叙事都没有时走不进来。
+ */
+export async function repairFloorStructure(floor: number): Promise<boolean> {
+  if (!engineActiveHere() || busy) return false;
+  const ctx = getContext();
+  if (!ctx) return false;
+  const chat = ctx.chat ?? [];
+  if (!isAiFloor(chat[floor]) || !leafValid(chat[floor])) return false;
+  const oldLeaf = getLeaf(chat[floor]);
+  if (!oldLeaf?.text.trim()) return false;
+
+  const operation = beginMemorySessionOperation();
+  if (!operation.isCurrent()) {
+    operation.dispose();
+    return false;
+  }
+  const sender = resolveSender('summary', operation.signal);
+  if ('error' in sender) {
+    operation.dispose();
+    engineState.lastError = sender.error;
+    noteFailure({ stage: '补结构化', error: new Error(sender.error), retries: 0, ...channelFlags('summary') });
+    return false;
+  }
+
+  const busyOwner = beginBusyWork();
+  engineState.lastError = '';
+  try {
+    const covered = coveredBeforeFloor(chat, floor);
+    const targets = floorTargets(chat, floor, covered);
+    const content = renderMessages(chat, targets, ctx.name1, ctx.name2);
+    const stateBefore = deriveMemory(chat, targets[0]);
+    const openPlans = stateBefore.plans.filter(plan => plan.status === 'open');
+    const prompt = buildDeltaRepairPrompt({
+      summary: oldLeaf.text,
+      content,
+      itemNames: stateBefore.items.map(item => item.name),
+      npcNames: stateBefore.npcs.map(npc => npc.name),
+      openPlans: openPlans.map(plan => plan.content),
+    });
+    const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
+    const messages: ChatMsg[] = [];
+    if (jb) messages.push({ role: 'system', content: jb });
+    messages.push({ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user });
+    const delta = await sendAndParse(sender.send, messages, raw => {
+      const parsed = extractJsonObject<SummaryDelta>(raw);
+      if (!parsed) throw new Error(raw.trim() ? '补结构化失败:AI道歉或掉格式' : '补结构化失败:AI空回');
+      return parsed;
+    }, '补结构化');
+    operation.assertCurrent();
+    if (getLeaf(chat[floor]) !== oldLeaf) {
+      throw new Error(`补结构化失败:楼层 #${floor} 的原摘要已变化`);
+    }
+    const dropped: string[] = [];
+    const storedDelta = finalizeDelta(delta, openPlans, stateBefore.lifeDetails, dropped);
+    const quoteSource = filterSummaryFeedIndices(chat, targets, apiSettings.summarizeAiOnly)
+      .map(index => clampToTimeTags(chat[index]?.mes ?? ''))
+      .join('\n');
+    const quotes = cleanExactQuotes(delta.quotes, quoteSource);
+    const leaf: LeafExtra = {
+      ...oldLeaf,
+      text: oldLeaf.text,
+      delta: storedDelta,
+      dropped: dropped.length ? dropped : undefined,
+    };
+    if (quotes.length) leaf.quotes = quotes;
+    chat[floor].extra = { ...(chat[floor].extra ?? {}), bbs_leaf: leaf };
+    noteDrops(dropped);
+    if (!apiSettings.summaryOnlyMode) {
+      const time = leaf.timeEnd || leaf.timeStart || '';
+      const changes = itemChangesOf(storedDelta, stateBefore.items, time);
+      let mes = writeItemLogTag(chat[floor].mes, fmtItemLogInline(changes));
+      mes = writeVarLogTag(mes, fmtVarOpsInline(storedDelta.varOps));
+      setMessageText(chat[floor], mes);
+    }
+    recomputeDerived();
+    refreshInjection();
+    scheduleLeafFlush();
+    return true;
+  } catch (e) {
+    if (!isStaleMemorySessionError(e) && !operation.signal.aborted) {
+      engineState.lastError = e instanceof Error ? e.message : String(e);
+      noteFailure({ stage: '补结构化', error: e, retries: apiSettings.summaryMaxRetries | 0, ...channelFlags('summary') });
+    }
+    return false;
+  } finally {
+    operation.dispose();
+    endBusyWork(busyOwner);
+    await afterSummaryHideAndInject(chat);
+  }
+}
+
 export async function regenerateFloor(floor: number): Promise<boolean> {
   if (!engineActiveHere()) return false;
   if (busy) return false;
@@ -1062,12 +1156,23 @@ function resolveSender(
  * 最多重试 apiSettings.summaryMaxRetries 次(默认 1),即「首试 + N 次重试」共 N+1 次尝试。
  * 全部失败则抛出最后一次的错误,由调用方写 lastError。
  */
+function channelFlags(task: TaskType): { stream: boolean | null; prefill: boolean | null } {
+  const channel = getChannelForTask(task);
+  if (!channel) return { stream: null, prefill: null };
+  return {
+    stream: channel.stream === true,
+    prefill: channel.prefill !== false && !/gemini/i.test(channel.model),
+  };
+}
+
 async function sendAndParse<T>(
   send: (messages: ChatMsg[]) => Promise<string>,
   messages: ChatMsg[],
   parse: (raw: string) => T,
+  stage: DiagnosticStage = '摘要',
 ): Promise<T> {
   const maxRetries = Math.max(0, apiSettings.summaryMaxRetries | 0);
+  const task: TaskType = stage === '总结' ? 'resummary' : 'summary';
   let lastErr: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -1079,7 +1184,14 @@ async function sendAndParse<T>(
       }
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  const error = lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  noteFailure({
+    stage,
+    error: lastErr instanceof ApiError ? lastErr : error,
+    retries: maxRetries,
+    ...channelFlags(task),
+  });
+  throw error;
 }
 
 /**
@@ -1167,7 +1279,8 @@ function applyLeafForFloor(
   // 未了结计划的有序列表:顺序即提示词里的 p1/p2…,用于把 resolve 短序号翻译成稳定 id
   const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
   // 生活小档案当前列表:顺序即提示词里的 d1/d2…,用于把 update/archive/remove 短序号翻译成稳定 id
-  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails);
+  const dropped: string[] = [];
+  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails, dropped);
 
   // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
   const timeStart = tag.start || llmOptionalScalar(delta.timeStart) || undefined;
@@ -1193,6 +1306,8 @@ function applyLeafForFloor(
     .join('\n');
   const quotes = cleanExactQuotes(delta.quotes, quoteSource);
   if (quotes.length) leaf.quotes = quotes;
+  if (dropped.length) leaf.dropped = dropped;
+  noteDrops(dropped);
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
   // 叶子正文/摘要已变 → 召回读到的向量内容会变,立即失效召回缓存(防重生成/翻页复用旧召回)。
@@ -1752,7 +1867,7 @@ export async function checkResummary(): Promise<number> {
           throw new Error(raw.trim() ? `${what}失败:AI道歉或掉格式` : `${what}失败:AI空回`);
         }
         return { summary };
-      });
+      }, '总结');
 
       operation.assertCurrent();
       // 生成上层节点收纳这批(**不删 batch**),时间戳取批内最新,排在它们之后
@@ -1924,7 +2039,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
         throw new Error(raw.trim() ? `${what}失败:AI道歉或掉格式` : `${what}失败:AI空回`);
       }
       return { summary };
-    });
+    }, '总结');
 
     operation.assertCurrent();
     // 时间范围:picked 已按楼层升序 → 首个有起始的作 start,末个有结束的作 end(同 checkResummary)

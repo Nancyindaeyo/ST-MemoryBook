@@ -2,7 +2,8 @@ import { hydrateSettings } from '@/api/settings';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
 import { runSupplementalRecall } from '@/memory/llmPick';
 import { clearLlmPickInjection } from '@/memory/inject';
-import { clearRecallInjection, runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
+import { captureRecallReceipt, reuseRecallReceipt } from '@/memory/recallReceipt';
+import { clearRecallInjection, recallTurn, runVectorRecall } from '@/memory/vector/recall';
 import { syncTimeTagRegex } from '@/memory/timeTag';
 import { bindChatLifecycle, flushLeavesNow } from '@/memory/store';
 import { invalidateMemorySession } from '@/memory/session';
@@ -41,9 +42,15 @@ const HOST_ID = 'bbs-app-host';
     const intercepted = await handleGenerationIntercept(type, abort);
     // 放行且该类型需要召回 → 先向量、再选材/前情抽段(写注入槽后再放行生成)。
     // 两路失败都只清各自的槽,绝不影响生成。
-    if (!intercepted && shouldRecallForType(type)) {
-      await runVectorRecall();
-      await runSupplementalRecall();
+    const turn = recallTurn(type);
+    if (!intercepted && turn !== 'skip') {
+      // 续写/重生/翻页复用这条用户消息的第一次成功回执;失败的那次不算,下次仍会实算。
+      const reused = turn === 'reuse' && reuseRecallReceipt();
+      if (!reused) {
+        const vector = await runVectorRecall();
+        const pick = await runSupplementalRecall();
+        captureRecallReceipt(vector, pick);
+      }
     } else if (!intercepted) {
       clearRecallInjection();
       clearLlmPickInjection();

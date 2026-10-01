@@ -22,7 +22,8 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
 import { getLeaf, leafBodyOutdated, leafValid, deleteLeafAt, editLeafFull, planContentById, describeVarOp } from '@/memory/apply';
-import { engineState, floorBackfillState, regenerateFloor, setFloorOmit, summarizeFloor } from '@/memory/engine';
+import { engineState, floorBackfillState, regenerateFloor, repairFloorStructure, setFloorOmit, summarizeFloor } from '@/memory/engine';
+import { forgetRecallReceipt, readRecallReceipt, recallReceiptSignal, userMessageBefore } from '@/memory/recallReceipt';
 import { derivedMeta } from '@/memory/store';
 import { ui } from '@/state/ui';
 import type { LeafExtra, StoredDelta, ItemDelta, NpcDelta, VarOp, JsonValue } from '@/memory/types';
@@ -75,6 +76,13 @@ const summarizingHere = computed(() => {
   return floorBackfillState.running
     && floorBackfillState.floor === props.floor
     && floorBackfillState.chatId === chatId;
+});
+const recallView = computed(() => {
+  void props.sig.tick;
+  void recallReceiptSignal.rev;
+  const chat = getContext()?.chat ?? [];
+  const receipt = readRecallReceipt(userMessageBefore(chat, props.floor));
+  return receipt;
 });
 const summaryActionDisabled = computed(() => busy.value || engineState.running || omit.value);
 const summaryActionTitle = computed(() => {
@@ -640,6 +648,23 @@ function requestSummary() {
   void generateMissingSummary();
 }
 
+function forgetThisRecall() {
+  const chat = getContext()?.chat ?? [];
+  forgetRecallReceipt(userMessageBefore(chat, props.floor));
+  toast('下次续写、重生或翻页会重新召回', 'info');
+}
+
+async function repairStructure() {
+  if (summaryActionDisabled.value) return;
+  busy.value = true;
+  try {
+    const ok = await repairFloorStructure(props.floor);
+    toast(ok ? '已补上结构化字段' : (engineState.lastError || '补结构化失败'), ok ? 'success' : 'warning');
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function generateMissingSummary() {
   if (summaryActionDisabled.value) return;
   await summarizeFloor(props.floor);
@@ -877,8 +902,24 @@ const groups = computed(() => [
                 </template>
               </div>
             </template>
-
             <p v-else class="bbs-summary-text bbs-fp-text is-muted">此楼尚无摘要。</p>
+
+            <section v-if="recallView" class="bbs-fp-recall">
+              <span class="bbs-fp-gtitle">本轮注入</span>
+              <p v-if="!recallView.lines.length" class="bbs-fp-note">本轮没有注入旧记忆。</p>
+              <ul v-else class="bbs-fp-recall-list">
+                <li v-for="(line, index) in recallView.lines" :key="index">
+                  <span class="bbs-fp-recall-src">{{ line.source }}</span>
+                  {{ line.preview }}
+                </li>
+              </ul>
+              <button class="bbs-fp-delleaf" type="button" @click="forgetThisRecall">重新召回</button>
+            </section>
+            <section v-if="leaf?.dropped?.length && !omit" class="bbs-fp-recall">
+              <span class="bbs-fp-gtitle">未写入</span>
+              <p class="bbs-fp-note">{{ leaf.dropped.join('、') }}。叙事摘要已留下。</p>
+              <button class="bbs-fp-delleaf" type="button" :disabled="summaryActionDisabled" @click="repairStructure">补结构化</button>
+            </section>
 
             <!-- 页脚:删除整楼摘要(行内两步确认,防误触) -->
             <div v-if="leaf && !omit" class="bbs-fp-footer">
@@ -1462,6 +1503,29 @@ const groups = computed(() => [
 .bbs-fp-confirm-ok:disabled {
   opacity: 0.55;
   cursor: default;
+}
+.bbs-fp-recall {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 4px;
+}
+.bbs-fp-recall-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bbs-fp-recall-list li {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--bbs-text-soft, var(--bbs-muted));
+}
+.bbs-fp-recall-src {
+  margin-right: 6px;
+  color: var(--bbs-accent, var(--bbs-text));
 }
 
 @media (prefers-reduced-motion: reduce) {

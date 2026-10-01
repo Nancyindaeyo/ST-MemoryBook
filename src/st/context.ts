@@ -20,6 +20,14 @@ export interface STMessage {
     bbs_hidden?: boolean;
     bbs_omit?: boolean;
     bbs_internal_notice?: 'backlog';
+    /** 这条用户消息第一次成功召回的回执。续写/重生/翻页复用,失败不写。 */
+    bbs_recall?: {
+      v: 1;
+      userHash: string;
+      vectorText: string;
+      pickText: string;
+      lines: { source: string; preview: string }[];
+    };
   };
 }
 

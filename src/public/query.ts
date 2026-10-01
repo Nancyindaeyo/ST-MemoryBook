@@ -1,4 +1,5 @@
 import { deriveMemory, getLeaf, leafValid } from '@/memory/apply';
+import { publicStoryDate } from '@/memory/planTimeline';
 import { isRealAiReply, pendingAiFloors } from '@/memory/engine';
 import {
   renderHistoryNodes,
@@ -136,7 +137,10 @@ export function getSnapshot(options?: SnapshotOptions): PublicSnapshot {
     protagonist: derived.protagonist,
     vars: derived.vars,
     items: derived.items,
-    plans: derived.plans,
+    plans: derived.plans.map(plan => ({
+      ...plan,
+      storyDate: publicStoryDate(plan.targetTime || plan.createdTime),
+    })),
     scenes: derived.scenes,
     npcs: derived.npcs,
     itemLog: derived.itemLog,

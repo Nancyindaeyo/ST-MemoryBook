@@ -1,3 +1,4 @@
+import type { PublicStoryDate } from '@/memory/planTimeline';
 import type {
   ItemLogEntry,
   JsonValue,
@@ -10,6 +11,9 @@ import type {
   MemState,
   StoredDelta,
 } from '@/memory/types';
+
+/** 公开计划 = 派生计划 + 能解析时的公历日期。解析不出为 null,不占构画的格子。 */
+export type PublicPlan = MemPlan & { storyDate: PublicStoryDate | null };
 
 export type SnapshotAt = 'before' | 'after';
 
@@ -61,7 +65,7 @@ export interface PublicSnapshot {
   protagonist: MemProtagonist;
   vars: Record<string, JsonValue>;
   items: MemItem[];
-  plans: MemPlan[];
+  plans: PublicPlan[];
   scenes: MemScene[];
   npcs: MemNpc[];
   itemLog: ItemLogEntry[];
@@ -174,7 +178,7 @@ export type PublicQueryResult =
   | MemState
   | MemProtagonist
   | MemItem[]
-  | MemPlan[]
+  | PublicPlan[]
   | MemScene[]
   | MemNpc[]
   | ItemLogEntry[]

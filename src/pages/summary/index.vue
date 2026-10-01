@@ -7,6 +7,8 @@ import { apiSettings } from '@/api/settings';
 import { batchBackfill, batchState, cancelBatchBackfill, cancelSummaryQueue, engineState, floorBackfillState, isAiFloor, resummarizeNow, summarizeFloor, summarizeQueue, summarizeSelected, summaryQueueState, syncHiddenNow } from '@/memory/engine';
 import { estimateInjectionTokenBreakdown, refreshInjection, selectViewNodes, type ViewNode } from '@/memory/inject';
 import { compactTimeLabel, formatRange, splitTimeLabel } from '@/memory/timeTag';
+import { copyDiagnostic } from '@/memory/diagnostic';
+import { groupPlans } from '@/memory/planTimeline';
 import { relativeTimeLabel, weekdayLabel } from '@/memory/timeRel';
 import { derivedMeta, memory, recomputeDerived, setRawPrequel } from '@/memory/store';
 import type { SceneFocus } from '@/memory/types';
@@ -136,6 +138,22 @@ const leafFloor = computed(() => {
 function planFloor(planId: string): number | undefined {
   const leafId = planId.replace(/^plan:/, '').replace(/#\d+$/, '');
   return leafFloor.value.get(leafId);
+}
+const timelineGroups = computed(() => groupPlans(memory.plans));
+function planOutcome(status: string, outcome?: string): string {
+  if (status !== 'resolved') return '进行中';
+  if (outcome === 'cancelled') return '已取消';
+  if (outcome === 'failed') return '未做成';
+  return '已了结';
+}
+function jumpToPlanFloor(planId: string) {
+  const floor = planFloor(planId);
+  if (floor === undefined) return;
+  document.querySelector(`.mes[mesid="${floor}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+async function copySafeDiagnostic() {
+  const ok = await copyDiagnostic();
+  toast(ok ? '已复制诊断' : '复制失败', ok ? 'success' : 'warning');
 }
 
 function addPlan() {
@@ -977,6 +995,32 @@ provide(SUMMARY_CTX, {
       </div>
     </div>
 
+    <div class="bbs-fold-section">
+      <div class="bbs-section-head">
+        <h2 class="bbs-title bbs-title-sub">时间线</h2>
+      </div>
+      <p v-if="!timelineGroups.length" class="bbs-plan-empty">还没有可按时间排开的计划或悬念。</p>
+      <div v-for="day in timelineGroups" :key="day.key" class="bbs-timeline-day">
+        <h3 class="bbs-timeline-label">{{ day.label }}</h3>
+        <div v-for="p in day.items" :key="p.id" class="bbs-plan">
+          <div class="bbs-plan-head">
+            <span class="bbs-plan-kind" :class="p.kind">{{ p.kind === 'suspense' ? '悬念' : '计划' }}</span>
+            <span class="bbs-plan-vis">{{ planOutcome(p.status, p.outcome) }}</span>
+            <button
+              v-if="planFloor(p.id) !== undefined"
+              class="bbs-plan-floor bbs-timeline-jump"
+              type="button"
+              :title="`跳到楼层 #${planFloor(p.id)}`"
+              @click="jumpToPlanFloor(p.id)"
+            >
+              #{{ planFloor(p.id) }}
+            </button>
+          </div>
+          <p class="bbs-plan-content">{{ p.content }}</p>
+        </div>
+      </div>
+    </div>
+
     <!-- 分章分隔:两侧细线 + 居中金色菱形(古籍分章鱼尾标记),比普通 hr 更明确地隔开两区 -->
     <div class="bbs-divider" role="separator" aria-hidden="true">
       <span class="bbs-divider-mark"></span>
@@ -1056,6 +1100,15 @@ provide(SUMMARY_CTX, {
         >
           <Icon name="summary" />
           <span class="bbs-btn-label">一键摘要</span>
+        </button>
+        <button
+          v-if="!selectMode"
+          class="bbs-btn bbs-btn-sm"
+          type="button"
+          title="复制最近一次失败的阶段、HTTP 状态和丢掉的字段类。不含正文、密钥和接口地址"
+          @click="copySafeDiagnostic"
+        >
+          <span class="bbs-btn-label">复制诊断</span>
         </button>
         <span v-else-if="!selectMode" class="bbs-batch-progress">
           <span class="bbs-pending-spin"></span>
@@ -2289,6 +2342,22 @@ provide(SUMMARY_CTX, {
 
 .bbs-empty {
   flex: 1;
+}
+.bbs-timeline-day {
+  margin: 8px 0 12px;
+}
+.bbs-timeline-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bbs-muted, var(--bbs-text-soft));
+}
+.bbs-timeline-jump {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
 }
 
 /* —— 编辑弹窗:外壳样式已提到 base.css 通用,这里只补本页专用的 textarea —— */

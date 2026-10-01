@@ -1422,6 +1422,30 @@ export const THINKING_PREFILL = `<thinking>
 1. 本楼定位:`;
 
 /** 与批量清单一样在发送前展开宏,不把占位符留给渠道处理。 */
+/**
+ * 叙事已经定稿时,只重问结构化增量。返回里的 summary 会被丢掉,叶子正文保持原样。
+ */
+export function buildDeltaRepairPrompt(input: {
+  summary: string;
+  content: string;
+  itemNames: string[];
+  npcNames: string[];
+  openPlans: string[];
+}): { system: string; user: string } {
+  const known = [
+    input.itemNames.length ? `已有物品: ${input.itemNames.slice(0, 40).join('、')}` : '',
+    input.npcNames.length ? `已有人物: ${input.npcNames.slice(0, 40).join('、')}` : '',
+    input.openPlans.length ? `未了结计划: ${input.openPlans.slice(0, 20).join('、')}` : '',
+  ].filter(Boolean).join('\n');
+  return {
+    system: `你在补一份已经定稿的楼层摘要所缺的结构化增量。不要重写叙事,也不要输出 summary。
+只输出一个 JSON 对象,不要 markdown。没有把握的条目直接省略。
+可用字段: items、scenes、npcs、plans、lifeDetails、vars、location、locationPath、sceneFocus、protagonist、quotes、timeStart、timeEnd。
+没有变化就输出 {}。`,
+    user: ['【已定稿摘要】', input.summary, known, '【本楼正文】', input.content].filter(Boolean).join('\n'),
+  };
+}
+
 export function buildSummaryThinking(user: string): { checklist: string; prefill: string } {
   return { checklist: fill(THINKING_CHECKLIST, { user: user || '主角' }), prefill: THINKING_PREFILL };
 }
