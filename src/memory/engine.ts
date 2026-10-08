@@ -1131,7 +1131,8 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
 /**
  * 解析某摘要任务实际怎么发请求:
  *  - 指派了副 API 渠道 → 用该渠道(requestCompletion);
- *  - 未指派(空)→ 跟随主 API(requestViaMainApi → generateRaw,用主界面当前在用的 API,不带聊天历史)。
+ *  - 未指派(空)→ 跟随主 API(requestViaMainApi,用主界面当前连接,不带聊天历史)。
+ *    聊天补全不走 generateRaw,因此可以和正文生成并行,不会被提示词钩子或输出清洗改写。
  * 主 API 也不可用(ST 无 generateRaw)时返回 error,调用方据此早退并写 lastError。
  */
 function resolveSender(

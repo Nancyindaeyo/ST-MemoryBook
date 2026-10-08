@@ -75,6 +75,8 @@ export interface STContext {
   extensionSettings?: Record<string, unknown>;
   /** 主界面当前聊天补全设置(oai_settings)。跟随主 API 时用来判断是不是 Gemini。 */
   chatCompletionSettings?: Record<string, unknown>;
+  /** 当前主 API 类型。`openai` 表示聊天补全;文本补全是 kobold / novel / textgenerationwebui。 */
+  mainApi?: string;
   /** 防抖保存全局设置(连同 extensionSettings 落盘到服务器)。ST 稳定 API。 */
   saveSettingsDebounced?: () => void;
   reloadCurrentChat: () => Promise<void>;

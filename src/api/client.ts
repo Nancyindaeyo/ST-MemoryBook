@@ -284,12 +284,8 @@ async function readSseContent(resp: Response): Promise<string> {
 
 /** 从标准 OpenAI 响应体提取文本 */
 function extractContent(data: any): string {
-  return (
-    data?.choices?.[0]?.message?.content ??
-    data?.choices?.[0]?.text ??
-    data?.content ??
-    ''
-  ).trim();
+  const content = data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.content ?? '';
+  return typeof content === 'string' ? content.trim() : contentToText(content);
 }
 
 /* ============ 跟随主 API(主界面当前在用的 API 设置) ============ */
@@ -297,33 +293,268 @@ function extractContent(data: any): string {
 /** 摘要/总结跟随主 API 时的响应上限:够装下思维链 + JSON,避免被主 API 默认 max tokens 截断。 */
 const MAIN_API_RESPONSE_LENGTH = 65535;
 
+/** 各聊天补全源在 oai_settings 里存放模型名的字段。与 ST getChatCompletionModel 对齐。 */
+const MAIN_API_MODEL_KEY: Record<string, string> = {
+  claude: 'claude_model',
+  openai: 'openai_model',
+  opencode: 'opencode_model',
+  makersuite: 'google_model',
+  vertexai: 'vertexai_model',
+  openrouter: 'openrouter_model',
+  ai21: 'ai21_model',
+  mistralai: 'mistralai_model',
+  custom: 'custom_model',
+  cohere: 'cohere_model',
+  perplexity: 'perplexity_model',
+  groq: 'groq_model',
+  siliconflow: 'siliconflow_model',
+  minimax: 'minimax_model',
+  aws_bedrock: 'aws_bedrock_model',
+  electronhub: 'electronhub_model',
+  chutes: 'chutes_model',
+  nanogpt: 'nanogpt_model',
+  deepseek: 'deepseek_model',
+  aimlapi: 'aimlapi_model',
+  xai: 'xai_model',
+  pollinations: 'pollinations_model',
+  cometapi: 'cometapi_model',
+  moonshot: 'moonshot_model',
+  fireworks: 'fireworks_model',
+  azure_openai: 'azure_openai_model',
+  zai: 'zai_model',
+  workers_ai: 'workers_ai_model',
+};
+
+/** OpenRouter 选「在官网选择模型」时的占位值,不能当成真实模型名发出去。 */
+const OPENROUTER_WEBSITE_MODEL = 'OR_Website';
+
+/**
+ * 只从主界面设置里抄连接身份,不抄正文预设。
+ * 停止串、角色预填充、工具广告、提示词后处理都会把摘要 JSON 切掉或改写成扮演。
+ */
+const MAIN_API_CONNECTION_KEYS = [
+  'secret_id',
+  'custom_url',
+  'custom_api_format',
+  'custom_include_body',
+  'custom_include_headers',
+  'custom_exclude_body',
+  'azure_base_url',
+  'azure_deployment_name',
+  'azure_api_version',
+  'vertexai_auth_mode',
+  'vertexai_region',
+  'vertexai_express_project_id',
+  'opencode_endpoint',
+  'opencode_api_format',
+  'zai_endpoint',
+  'siliconflow_endpoint',
+  'pollinations_endpoint',
+  'moonshot_endpoint',
+  'minimax_endpoint',
+  'workers_ai_account_id',
+  'aws_bedrock_region',
+  'aws_bedrock_custom_template',
+  'aws_bedrock_custom_response_path',
+  'aws_bedrock_custom_stream_path',
+  'nanogpt_provider',
+] as const;
+
+function settingText(settings: Record<string, unknown>, key: string): string {
+  const value = settings[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/** 当前聊天补全源实际使用的模型名。 */
+export function mainApiModel(settings: Record<string, unknown>): string {
+  const source = settingText(settings, 'chat_completion_source');
+  const key = MAIN_API_MODEL_KEY[source];
+  const model = key ? settingText(settings, key) : '';
+  if (source === 'openrouter' && model === OPENROUTER_WEBSITE_MODEL) return '';
+  return model;
+}
+
+/** o1 / gpt-5 家族不接受 max_tokens,要改成 max_completion_tokens。 */
+function usesMaxCompletionTokens(model: string): boolean {
+  return /^(?:openai\/)?(?:o1|o3|o4)\b/.test(model) || /gpt-5/.test(model);
+}
+
+/** 这些型号仍接受 temperature。其余推理型号带上采样参数会直接 400。 */
+function keepsSamplingParams(model: string): boolean {
+  return /gpt-5-chat-latest/.test(model)
+    || (/gpt-5\.(?:1|2|3|4)/.test(model) && !/chat-latest/.test(model));
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * 构造「跟随主 API」的请求体。
+ *
+ * 直接打 ST 的 /generate,只带当前连接(源、模型、密钥、反代地址)和我们自己的消息。
+ * 不经过 generateRaw:那条路会在正文生成进行中广播 prompt-ready,被预设脚本改成角色扮演,
+ * 再被停止串和 AI 输出正则切掉 JSON。这里不改全局 max tokens,所以可以和正文请求并行。
+ */
+export function buildMainApiRequestBody(
+  settings: Record<string, unknown>,
+  messages: ChatMsg[],
+): Record<string, unknown> {
+  const source = settingText(settings, 'chat_completion_source');
+  const model = mainApiModel(settings);
+  const body: Record<string, unknown> = {
+    type: 'quiet',
+    chat_completion_source: source,
+    model,
+    messages,
+    max_tokens: MAIN_API_RESPONSE_LENGTH,
+    stream: false,
+    // 给防截断类 fetch 拦截器的放行握手。ST 服务端只在 tools 非空时才转发给上游。
+    tool_choice: 'none',
+    // 摘要的 system 就是任务规则,必须按系统消息送出,不受角色卡「不使用系统提示」影响。
+    use_sysprompt: true,
+    enable_web_search: false,
+    request_images: false,
+  };
+
+  const temperature = finiteNumber(settings.temp_openai);
+  if (temperature !== undefined) body.temperature = temperature;
+  const topP = finiteNumber(settings.top_p_openai);
+  if (topP !== undefined) body.top_p = topP;
+  const topK = finiteNumber(settings.top_k_openai);
+  if (topK !== undefined && topK > 0) body.top_k = topK;
+
+  const effort = settingText(settings, 'reasoning_effort');
+  if (effort && effort !== 'auto') body.reasoning_effort = effort;
+
+  if (typeof settings.reverse_proxy === 'string' && settings.reverse_proxy.trim()) {
+    body.reverse_proxy = settings.reverse_proxy.trim();
+    if (typeof settings.proxy_password === 'string') body.proxy_password = settings.proxy_password;
+  }
+
+  for (const key of MAIN_API_CONNECTION_KEYS) {
+    const value = settings[key];
+    if (typeof value === 'string' && value.trim()) body[key] = value.trim();
+  }
+  if (settings.custom_claude_prompt_caching === true) body.custom_claude_prompt_caching = true;
+  if (settings.custom_openai_responses_websocket === true) body.custom_openai_responses_websocket = true;
+  if (settings.aws_bedrock_use_custom_template === true) body.aws_bedrock_use_custom_template = true;
+  if (settings.nanogpt_payg_override === true) body.nanogpt_payg_override = true;
+
+  if (usesMaxCompletionTokens(model)) {
+    body.max_completion_tokens = MAIN_API_RESPONSE_LENGTH;
+    delete body.max_tokens;
+    if (!keepsSamplingParams(model)) {
+      delete body.temperature;
+      delete body.top_p;
+    }
+  }
+  return body;
+}
+
+function contentToText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) return value.map(contentToText).filter(Boolean).join('\n').trim();
+  if (!value || typeof value !== 'object') return '';
+  const part = value as Record<string, unknown>;
+  const bits = [part.text, part.thinking, part.reasoning, part.reasoning_content]
+    .map(contentToText)
+    .filter(Boolean);
+  if (Array.isArray(part.parts)) bits.push(contentToText(part.parts));
+  if (!bits.length && typeof part.content === 'string') bits.push(part.content.trim());
+  return bits.filter(Boolean).join('\n').trim();
+}
+
+/**
+ * 取出主 API 响应里的正文。可见内容里已经有 JSON 就只用它;
+ * 否则把思维链一并带上,避免推理模型把摘要写进 reasoning、正文只留一句道歉。
+ */
+export function extractMainApiContent(data: unknown): string {
+  if (!data || typeof data !== 'object') return '';
+  const root = data as Record<string, unknown>;
+  const choice = Array.isArray(root.choices) ? root.choices[0] as Record<string, unknown> | undefined : undefined;
+  const message = choice?.message && typeof choice.message === 'object'
+    ? choice.message as Record<string, unknown>
+    : undefined;
+  const visible = contentToText(message?.content) || contentToText(choice?.text);
+  if (visible.includes('{')) return visible;
+  const hidden = [
+    message?.reasoning_content,
+    message?.reasoning,
+    root.content,
+    root.responseContent,
+  ].map(contentToText).filter(Boolean).join('\n');
+  return [hidden, visible].filter(Boolean).join('\n').trim();
+}
+
 /**
  * 是否具备「跟随主 API」的条件:ST 暴露了 generateRaw(稳定 API)即可。
- * 不再依赖连接管理/连接档——直接借用主界面当前正在用的 API。
+ * 聊天补全实际不调用它,它仍作为文本补全和旧版本的兜底。
  */
 export function mainApiAvailable(): boolean {
   return typeof getContext()?.generateRaw === 'function';
 }
 
+/** 聊天补全可以绕开 generateRaw,自己把当前连接打到 /generate。 */
+function canIsolateMainChat(ctx: NonNullable<ReturnType<typeof getContext>>): boolean {
+  const source = settingText(ctx.chatCompletionSettings ?? {}, 'chat_completion_source');
+  if (!source) return false;
+  // 文本补全没有这套聊天补全请求体,继续走 generateRaw。
+  return ctx.mainApi == null || ctx.mainApi === '' || ctx.mainApi === 'openai';
+}
+
 /**
- * 用「当前主 API」(主界面正在用的聊天补全/文本补全设置)发一次补全。
- * 走 ST 的 generateRaw:只发我们给的这几条消息,不带聊天历史/角色卡;无需连接档。
- * quiet 类型内部强制非流式,返回清洗后的整段文本;失败抛 ApiError。
+ * 用「当前主 API」发一次补全。只发调用方给的消息,不带聊天历史。
  *
- * ⚠️ 这条路径的请求体由 ST 构造,带不上 `tool_choice: 'none'`,第三方 fetch 拦截器
- * (如防截断脚本)仍可能改写它。摘要/重摘要尽量指派副 API 渠道,走 buildRequestBody 那条路。
+ * 聊天补全直接请求 ST 代理,和正在进行的正文生成互不改写,因此自动摘要可以并行。
+ * 文本补全仍走 generateRaw。
  */
 export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOptions = {}): Promise<string> {
   const ctx = getContext();
-  if (typeof ctx?.generateRaw !== 'function') {
+  if (!ctx) throw new ApiError('SillyTavern 上下文不可用');
+  if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+  if (canIsolateMainChat(ctx)) {
+    return requestIsolatedMainChat(ctx, messages, opts);
+  }
+  if (typeof ctx.generateRaw !== 'function') {
     throw new ApiError('当前 ST 版本不支持 generateRaw,无法跟随主 API');
   }
-  if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  // 跟随主 API 没有渠道上的预填充开关。主界面当前是 Gemini 时同样收成「system 在前、以 user 结束」,
-  // 否则 generateRaw 会把 assistant 预填充原样送出,TT 把 Gemini 的 400 包成 quiet 请求的 502。
   const prompt = mainApiRejectsPrefill() ? messagesWithoutPrefill(messages) : messages;
   const content = (await ctx.generateRaw({ prompt, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
   if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  if (!content) throw new ApiError('主 API 返回空内容');
+  return content;
+}
+
+async function requestIsolatedMainChat(
+  ctx: NonNullable<ReturnType<typeof getContext>>,
+  messages: ChatMsg[],
+  opts: RequestOptions,
+): Promise<string> {
+  const settings = ctx.chatCompletionSettings ?? {};
+  const prompt = mainApiRejectsPrefill() ? messagesWithoutPrefill(messages) : messages;
+  const body = buildMainApiRequestBody(settings, prompt);
+  if (!body.model) throw new ApiError('主 API 未选择模型,无法跟随');
+
+  const resp = await fetch(GENERATE_URL, {
+    method: 'POST',
+    headers: ctx.getRequestHeaders(),
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  });
+  if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new ApiError(`主 API 请求失败 (${resp.status}): ${text.slice(0, 300)}`, resp.status);
+  }
+  const data = await resp.json();
+  if (data?.error) {
+    const message = typeof data.error === 'string' ? data.error : data.error.message;
+    throw new ApiError(message || '主 API 返回错误');
+  }
+  const content = extractMainApiContent(data);
   if (!content) throw new ApiError('主 API 返回空内容');
   return content;
 }
@@ -334,12 +565,16 @@ export function mainApiRejectsPrefill(): boolean {
   if (!settings) return false;
   const source = String(settings.chat_completion_source ?? '').toLowerCase();
   if (source === 'makersuite' || source === 'vertexai') return true;
+  const format = `${settings.custom_api_format ?? ''}\n${settings.opencode_api_format ?? ''}`;
+  if (/gemini/i.test(format)) return true;
   const model = [
     settings.google_model,
     settings.vertexai_model,
     settings.openai_model,
     settings.custom_model,
     settings.openrouter_model,
+    settings.opencode_model,
+    mainApiModel(settings),
   ]
     .map(value => String(value ?? ''))
     .join('\n');

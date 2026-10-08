@@ -3,7 +3,7 @@ import type { ApiChannel } from '@/api/settings';
 import * as context from '@/st/context';
 import type { STContext } from '@/st/context';
 import { RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL } from '@/memory/prompts';
-import { buildRequestBody, mainApiRejectsPrefill, messagesWithoutPrefill, requestCompletion, requestViaMainApi } from './client';
+import { buildMainApiRequestBody, buildRequestBody, extractMainApiContent, mainApiRejectsPrefill, messagesWithoutPrefill, requestCompletion, requestViaMainApi } from './client';
 
 const channel: ApiChannel = {
   id: 'ch1',
@@ -174,12 +174,29 @@ describe('main API gemini prefill', () => {
     expect(mainApiRejectsPrefill()).toBe(false);
   });
 
-  it('strips the trailing assistant prefill before generateRaw when the main API is Gemini', async () => {
+  it('strips the trailing assistant prefill and does not call generateRaw when the main API is Gemini', async () => {
     const generateRaw = vi.fn().mockResolvedValue('{"summary":"ok"}');
+    const settings = {
+      chat_completion_source: 'openai',
+      openai_model: 'gemini-3.8-flash',
+      openai_max_tokens: 300,
+      temp_openai: 1,
+      reverse_proxy: 'https://api.example.com/v1',
+      proxy_password: 'sk-test',
+      stop_strings: ['\n\n'],
+      assistant_prefill: 'stay in character',
+      custom_prompt_post_processing: 'strict',
+    };
     vi.spyOn(context, 'getContext').mockReturnValue({
       generateRaw,
-      chatCompletionSettings: { chat_completion_source: 'openai', custom_model: 'gemini-3.8-flash' },
+      mainApi: 'openai',
+      chatCompletionSettings: settings,
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
     } as unknown as STContext);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ choices: [{ message: { content: '{"summary":"ok"}' } }] }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
     const messages = [
       { role: 'system' as const, content: 'rules' },
       { role: 'user' as const, content: 'source' },
@@ -187,9 +204,64 @@ describe('main API gemini prefill', () => {
       { role: 'assistant' as const, content: '<thinking>' },
     ];
     await requestViaMainApi(messages);
-    expect(generateRaw).toHaveBeenCalledWith({
-      prompt: messagesWithoutPrefill(messages),
-      responseLength: 65535,
+    expect(generateRaw).not.toHaveBeenCalled();
+    expect(settings.openai_max_tokens).toBe(300);
+    const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+    expect(body.messages).toEqual(messagesWithoutPrefill(messages));
+    expect(body.messages.at(-1)).toEqual({ role: 'user', content: 'source' });
+    expect(body.max_tokens).toBe(65535);
+    expect(body.stream).toBe(false);
+    expect(body.tool_choice).toBe('none');
+    expect(body.stop).toBeUndefined();
+    expect(body.assistant_prefill).toBeUndefined();
+    expect(body.custom_prompt_post_processing).toBeUndefined();
+    expect(body.reverse_proxy).toBe('https://api.example.com/v1');
+    expect(body.proxy_password).toBe('sk-test');
+    expect(body.model).toBe('gemini-3.8-flash');
+  });
+
+  it('keeps generateRaw for text completion, where there is no chat-completion body', async () => {
+    const generateRaw = vi.fn().mockResolvedValue('{"summary":"ok"}');
+    vi.spyOn(context, 'getContext').mockReturnValue({
+      generateRaw,
+      mainApi: 'textgenerationwebui',
+      chatCompletionSettings: { chat_completion_source: 'openai', openai_model: 'unused' },
+    } as unknown as STContext);
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+    await requestViaMainApi([{ role: 'user', content: 'source' }]);
+    expect(generateRaw).toHaveBeenCalledOnce();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('isolated main API body', () => {
+  it('uses max_completion_tokens for gpt-5 and does not copy story stop strings', () => {
+    const body = buildMainApiRequestBody({
+      chat_completion_source: 'openai',
+      openai_model: 'gpt-5',
+      openai_max_tokens: 300,
+      temp_openai: 0.8,
+      top_p_openai: 1,
+    }, [{ role: 'user', content: 'summarize' }]);
+    expect(body.max_completion_tokens).toBe(65535);
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.temperature).toBeUndefined();
+    expect(body.stop).toBeUndefined();
+  });
+
+  it('reads JSON from the reasoning channel when the visible reply is only an apology', () => {
+    const raw = extractMainApiContent({
+      choices: [{ message: { content: 'Sorry, I cannot help with that.', reasoning_content: '{"summary":"她把钥匙放进抽屉。"}' } }],
     });
+    expect(raw).toContain('{"summary":"她把钥匙放进抽屉。"}');
+    expect(raw).toContain('Sorry');
+  });
+
+  it('keeps a visible JSON reply without prepending the reasoning trace', () => {
+    const raw = extractMainApiContent({
+      choices: [{ message: { content: '{"summary":"ok"}', reasoning_content: '先想一下 {草稿}' } }],
+    });
+    expect(raw).toBe('{"summary":"ok"}');
   });
 });
