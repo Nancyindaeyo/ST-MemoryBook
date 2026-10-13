@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ApiChannel } from '@/api/settings';
 import * as context from '@/st/context';
 import type { STContext } from '@/st/context';
-import { RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL } from '@/memory/prompts';
+import { RESUMMARY_THINKING_CHECKLIST } from '@/memory/prompts';
 import { buildMainApiRequestBody, buildRequestBody, extractMainApiContent, mainApiRejectsPrefill, messagesWithoutPrefill, requestCompletion, requestViaMainApi } from './client';
 
 const channel: ApiChannel = {
@@ -15,7 +15,6 @@ const channel: ApiChannel = {
   maxTokens: 1024,
   timeoutSec: 60,
   stream: false,
-  prefill: true,
   excludeParams: [],
   reasoningEffort: '',
 };
@@ -100,10 +99,7 @@ describe('visible compression audit transport', () => {
     vi.restoreAllMocks();
   });
 
-  it.each([
-    [true, false], [false, false],
-    [true, true], [false, true],
-  ] as const)('keeps the checklist and raw audit (prefill=%s, stream=%s)', async (prefill, stream) => {
+  it.each([false, true])('keeps the checklist and raw audit (stream=%s)', async stream => {
     vi.spyOn(context, 'getContext').mockReturnValue({
       getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
     } as unknown as STContext);
@@ -117,25 +113,17 @@ describe('visible compression audit transport', () => {
       { role: 'system' as const, content: 'Task schema and compression rules.' },
       { role: 'user' as const, content: 'Compress the supplied summaries.' },
       { role: 'system' as const, content: RESUMMARY_THINKING_CHECKLIST },
-      { role: 'assistant' as const, content: RESUMMARY_THINKING_PREFILL },
     ];
 
-    expect(await requestCompletion({ ...channel, prefill, stream }, messages)).toBe(raw);
+    expect(await requestCompletion({ ...channel, stream }, messages)).toBe(raw);
     const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-    const withoutPrefill = messagesWithoutPrefill(messages);
-    expect(body.messages).toEqual(prefill ? messages : withoutPrefill);
+    expect(body.messages).toEqual(messages);
     expect(body.messages[0]).toEqual(messages[0]);
-    expect(body.messages).toContainEqual({ role: 'system', content: RESUMMARY_THINKING_CHECKLIST });
-    if (!prefill) {
-      expect(body.messages.at(-1)?.role).toBe('user');
-      expect(body.messages.findIndex((m: { role: string }) => m.role === 'user')).toBeGreaterThan(
-        body.messages.findIndex((m: { content: string }) => m.content === RESUMMARY_THINKING_CHECKLIST),
-      );
-    }
-    expect(messages).toHaveLength(4);
+    expect(body.messages.at(-1)).toEqual({ role: 'system', content: RESUMMARY_THINKING_CHECKLIST });
+    expect(messages).toHaveLength(3);
   });
 
-  it('drops prefill for a gemini model even when the switch is still on', async () => {
+  it('reorders a gemini request so no system follows the user', async () => {
     vi.spyOn(context, 'getContext').mockReturnValue({
       getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
     } as unknown as STContext);
@@ -147,9 +135,9 @@ describe('visible compression audit transport', () => {
       { role: 'system' as const, content: 'rules' },
       { role: 'user' as const, content: 'source' },
       { role: 'system' as const, content: RESUMMARY_THINKING_CHECKLIST },
-      { role: 'assistant' as const, content: RESUMMARY_THINKING_PREFILL },
+      { role: 'assistant' as const, content: '<thinking>' },
     ];
-    await requestCompletion({ ...channel, model: 'gemini-3.8-flash', prefill: true }, messages);
+    await requestCompletion({ ...channel, model: 'gemini-3.8-flash' }, messages);
     const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
     expect(body.messages).toEqual(messagesWithoutPrefill(messages));
     expect(body.messages.at(-1)).toEqual({ role: 'user', content: 'source' });

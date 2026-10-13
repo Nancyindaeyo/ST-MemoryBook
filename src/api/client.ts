@@ -175,12 +175,12 @@ export function buildRequestBody(
 }
 
 /**
- * 关闭预填充时整理成 Gemini 能接受的消息序。
+ * 整理成 Gemini 能接受的消息序。
  *
- * 摘要请求的思考清单是一条 system,排在 user 后面,末尾再跟一条 assistant 预填充。
- * Gemini 3 不续写预填充,并且拒绝「user 之后再出现 system」或连续的 user 轮,直接 400。
- * 关掉预填充时:丢掉末尾 assistant,并把所有 system(含思考清单)挪到最前,让请求以 user 结束。
- * 清单内容仍会发给模型。预填充开着时保持原顺序,Claude 等后端继续从末尾 assistant 续写。
+ * 摘要请求的思考清单是一条 system,排在 user 后面。
+ * Gemini 拒绝「user 之后再出现 system」,直接 400。
+ * 丢掉末尾残留的 assistant,并把所有 system(含思考清单)挪到最前,让请求以 user 结束。
+ * 清单内容仍会发给模型。其他模型保持原顺序。
  */
 export function messagesWithoutPrefill(messages: ChatMsg[]): ChatMsg[] {
   const trimmed =
@@ -205,9 +205,8 @@ async function requestCompletionAtUrl(
   if (!channel.url || !channel.model) throw new ApiError('副 API 渠道未配置完整(缺 url 或 model)');
 
   const stream = channel.stream ?? false;
-  // 模型名里带 gemini 时也收成无预填充:Gemini 3 不续写,开着预填充一样 400。
-  const dropPrefill = channel.prefill === false || /gemini/i.test(channel.model);
-  const outMessages = dropPrefill ? messagesWithoutPrefill(messages) : messages;
+  // Gemini 拒绝 user 后面再跟 system。其他模型保留思考清单在 user 之后的原顺序。
+  const outMessages = /gemini/i.test(channel.model) ? messagesWithoutPrefill(messages) : messages;
   const body = buildRequestBody(channel, outMessages, reverseProxy, stream);
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);

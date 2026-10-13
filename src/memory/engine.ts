@@ -20,7 +20,8 @@ import {
   type MemorySessionOperation,
 } from './session';
 import { clearInjection, clearLlmPickInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildDeltaRepairPrompt, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, buildWorldInfoSystem, fmtItemLogInline, JAILBREAK_PROMPT, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
+import { fmtConditionFragments } from './conditionPatch';
+import { buildBatchSummaryPrompt, buildBatchThinking, buildCharCardSystem, buildDeltaRepairPrompt, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, buildWorldInfoSystem, fmtItemLogInline, isBuiltinSummaryPrompt, JAILBREAK_PROMPT, RESUMMARY_THINKING_CHECKLIST, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, recomputeDerived, scheduleLeafFlush } from './store';
@@ -831,7 +832,10 @@ export async function repairFloorStructure(floor: number): Promise<boolean> {
       throw new Error(`补结构化失败:楼层 #${floor} 的原摘要已变化`);
     }
     const dropped: string[] = [];
-    const storedDelta = finalizeDelta(delta, openPlans, stateBefore.lifeDetails, dropped);
+    const storedDelta = finalizeDelta(delta, openPlans, stateBefore.lifeDetails, dropped, {
+      content,
+      enforce: isBuiltinSummaryPrompt(),
+    });
     const quoteSource = filterSummaryFeedIndices(chat, targets, apiSettings.summarizeAiOnly)
       .map(index => clampToTimeTags(chat[index]?.mes ?? ''))
       .join('\n');
@@ -1157,13 +1161,10 @@ function resolveSender(
  * 最多重试 apiSettings.summaryMaxRetries 次(默认 1),即「首试 + N 次重试」共 N+1 次尝试。
  * 全部失败则抛出最后一次的错误,由调用方写 lastError。
  */
-function channelFlags(task: TaskType): { stream: boolean | null; prefill: boolean | null } {
+function channelFlags(task: TaskType): { stream: boolean | null } {
   const channel = getChannelForTask(task);
-  if (!channel) return { stream: null, prefill: null };
-  return {
-    stream: channel.stream === true,
-    prefill: channel.prefill !== false && !/gemini/i.test(channel.model),
-  };
+  if (!channel) return { stream: null };
+  return { stream: channel.stream === true };
 }
 
 async function sendAndParse<T>(
@@ -1267,6 +1268,7 @@ function applyLeafForFloor(
   delta: SummaryDelta,
   stateBefore: ReturnType<typeof deriveMemory>,
   replaceLeaf?: LeafExtra,
+  guard?: { content: string; enforce: boolean },
 ): void {
   if (!chat[aiFloor]) {
     throw new Error(`摘要落叶失败:楼层 #${aiFloor} 已不存在(可能在请求期间被删除)`);
@@ -1281,7 +1283,7 @@ function applyLeafForFloor(
   const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
   // 生活小档案当前列表:顺序即提示词里的 d1/d2…,用于把 update/archive/remove 短序号翻译成稳定 id
   const dropped: string[] = [];
-  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails, dropped);
+  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails, dropped, guard);
 
   // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
   const timeStart = tag.start || llmOptionalScalar(delta.timeStart) || undefined;
@@ -1378,7 +1380,7 @@ async function summarizeFloorWork(
       name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation,
       affinityInner: n.affinityInner, affinityOuter: n.affinityOuter, affinityNote: n.affinityNote,
       ties: n.ties, title: n.title, personality: n.personality, important: n.important,
-      outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location,
+      outfit: n.outfit, condition: n.condition ? fmtConditionFragments(n.condition) : undefined, follow: n.follow, location: n.location,
       aliases: n.aliases, visibility: n.visibility, lockedFields: n.lockedFields,
       // 在场标记按「本楼之前」的状态算,要 AI 逐个对照做离场/归场对账(与注入端同一权威判定)
       presence: classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath),
@@ -1395,7 +1397,7 @@ async function summarizeFloorWork(
     varsRule: (['global', 'char', 'chat'] as const).map(t => memory.varTemplates[t].rule.trim()).filter(Boolean).join('\n\n'),
   });
 
-  const { checklist, prefill } = buildSummaryThinking(ctx.name1);
+  const checklist = buildSummaryThinking(ctx.name1);
   const messages: ChatMsg[] = [];
   const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
   if (jb) messages.push({ role: 'system', content: jb });
@@ -1406,7 +1408,6 @@ async function summarizeFloorWork(
     { role: 'system', content: prompt.system },
     { role: 'user', content: prompt.user },
     { role: 'system', content: checklist },
-    { role: 'assistant', content: prefill },
   );
   options.onRequestStart?.();
   const delta = await sendAndParse(sender.send, messages, raw => {
@@ -1420,7 +1421,10 @@ async function summarizeFloorWork(
   });
 
   operation?.assertCurrent();
-  applyLeafForFloor(chat, aiFloor, delta, stateBefore, options.replaceLeaf);
+  applyLeafForFloor(chat, aiFloor, delta, stateBefore, options.replaceLeaf, {
+    content,
+    enforce: isBuiltinSummaryPrompt(),
+  });
   engineState.lastRunAt = Date.now();
 
   // 立刻反映到派生与注入;落盘走防抖(隐藏由收尾的 syncWindowHiddenState 统一负责)
@@ -1565,7 +1569,7 @@ async function summarizeBatchWork(
     floorCount: block.length,
   });
 
-  const { checklist, prefill } = buildBatchThinking(block.length);
+  const checklist = buildBatchThinking(block.length);
   const messages: ChatMsg[] = [];
   const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
   if (jb) messages.push({ role: 'system', content: jb });
@@ -1576,7 +1580,6 @@ async function summarizeBatchWork(
     { role: 'system', content: prompt.system },
     { role: 'user', content: prompt.user },
     { role: 'system', content: checklist },
-    { role: 'assistant', content: prefill },
   );
 
   // 解析 { floors: [...] };校验长度等于块楼数(缺楼/多楼都算失败,触发重试/回退)
@@ -1855,7 +1858,6 @@ export async function checkResummary(): Promise<number> {
         { role: 'system', content: prompt.system },
         { role: 'user', content: prompt.user + hints },
         { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
-        { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
       );
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
       const delta = await sendAndParse(sender.send, messages, raw => {
@@ -2029,7 +2031,6 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
       { role: 'system', content: prompt.system },
       { role: 'user', content: prompt.user + hints },
       { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
-      { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
     );
     const delta = await sendAndParse(sender.send, messages, raw => {
       console.log('[柏宝书] 强制总结原始返回(未清洗):\n', raw);

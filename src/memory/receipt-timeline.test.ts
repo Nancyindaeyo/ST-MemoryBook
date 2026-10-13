@@ -65,7 +65,6 @@ describe('安全诊断', () => {
       error: new ApiError('副 API 请求失败 (524): https://example.com/v1 Bearer sk-abcdefghi', 524),
       retries: 1,
       stream: false,
-      prefill: false,
     });
     noteDrops(['物品新增 1 条']);
     const text = formatDiagnostic();

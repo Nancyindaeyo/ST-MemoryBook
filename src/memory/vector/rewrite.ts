@@ -98,13 +98,10 @@ function buildMessages(chat: STMessage[]): ChatMsg[] {
   // 开头唯一 system:系统提示词 +(可选)历史剧情摘要,合并为一条,保证 system 只出现在开头
   const history = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, chat, windowStart));
   let systemContent = history ? `${QUERY_REWRITE_SYSTEM}\n\n[历史剧情摘要]\n${history}` : QUERY_REWRITE_SYSTEM;
-  // 启用破限:把破限提示词置顶拼进开头这条唯一 system 的最前面。
-  // 不新增一条 system,以守住「system 仅允许出现在数组最开头」的渠道约束——拼进即等于「最开头 + system 身份」。
-  // 破限文本取自「自定义提示词 · 破限」,留空则回退内置默认(与摘要/总结两端同口径,见 engine.ts)。
-  if (apiSettings.vector.queryRewriteJailbreak) {
-    const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
-    if (jb) systemContent = `${jb}\n\n${systemContent}`;
-  }
+  // 破限始终置顶拼进开头这条唯一 system。不另开一条,以守住「system 只允许在最开头」的渠道。
+  // 文本取自「自定义提示词 · 破限」,留空则用 NVWA 默认。
+  const jb = apiSettings.prompts.jailbreak.trim() || JAILBREAK_PROMPT;
+  if (jb) systemContent = `${jb}\n\n${systemContent}`;
   const messages: ChatMsg[] = [{ role: 'system', content: systemContent }];
 
   // 平铺窗口对话(纯 user/assistant),记录原 msgIndex 以定位快照插入点

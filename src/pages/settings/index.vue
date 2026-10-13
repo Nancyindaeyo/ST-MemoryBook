@@ -1367,19 +1367,10 @@ function exportPublicApiDocument() {
             </label>
           </div>
 
-          <!-- 破限:仅 Query 重写(三角色里只有它生成文本)。 -->
+          <!-- 查询重写与摘要共用破限,不再单独开关。 -->
           <template v-if="role.key === 'queryRewrite'">
-            <label class="bbs-switch-row">
-              <span class="bbs-field-label">启用破限</span>
-              <input
-                v-model="apiSettings.vector.queryRewriteJailbreak"
-                type="checkbox"
-                class="bbs-checkbox"
-                :disabled="!apiSettings.vector.enabled"
-              />
-            </label>
             <p class="bbs-field-hint">
-              使用 Gemini 等模型作为重写模型时,开启这个选项,并把最大 Token 改为 65535。
+              查询重写与摘要共用破限提示词。用 Gemini 做重写模型时,把最大 Token 改为 65535。
             </p>
           </template>
           </div>
@@ -1816,11 +1807,7 @@ function exportPublicApiDocument() {
           <span class="bbs-modal-label">流式传输</span>
           <input v-model="editingChannel.stream" type="checkbox" class="bbs-checkbox" />
         </label>
-        <label class="bbs-switch-row">
-          <span class="bbs-modal-label">发送预填充</span>
-          <input v-model="editingChannel.prefill" type="checkbox" class="bbs-checkbox" />
-        </label>
-        <span class="bbs-field-hint">默认开。Gemini 等不支持预填充的模型请关闭:会去掉末尾的 assistant,并把思考清单挪到用户消息之前。</span>
+        <span class="bbs-field-hint">模型名含 Gemini 时,思考清单会自动挪到用户消息之前,避免 user 后面再跟 system 被拒。</span>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">排除参数</span>
           <input

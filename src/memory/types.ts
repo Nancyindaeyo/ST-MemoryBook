@@ -294,6 +294,36 @@ export interface PlanResolveEntry {
 export type PlanResolveItem = string | PlanResolveEntry;
 
 /**
+ * 同一未了结事项的改期/暂缓。
+ * SummaryDelta 里 id 是短序号 p1/p2;StoredDelta 里是稳定 plan id。
+ * 不改 visibility:知情范围沿用原条目。
+ */
+export interface PlanUpdateItem {
+  id: string;
+  /** 省略=保持旧正文;有内容=整体替换,须保留仍有效义务 */
+  content?: string;
+  /** 省略=不改期限;空字符串=撤销旧期限而新期未定 */
+  targetTime?: string;
+}
+
+/**
+ * 伤情局部更新协议的片段操作。
+ * replace 用 id(c1/c2…)定位旧片段,text 为空串表示清除该片段;
+ * add 追加新片段。未列入 replace 的旧片段由程序原样保留。
+ * evidence 只在解析时核对,不入库。
+ */
+export interface ConditionPatchOp {
+  id?: string;
+  text: string;
+  evidence?: string;
+}
+
+export interface ConditionPatch {
+  replace?: ConditionPatchOp[];
+  add?: ConditionPatchOp[];
+}
+
+/**
  * 计划 / 悬念(派生产物,不持久化)。
  * id 确定性:`plan:${产生它的叶子id}#${在该叶子 add 数组里的序号}`。
  */
@@ -570,8 +600,12 @@ export interface NpcDelta extends NpcAffinity {
   personality?: string;
   /** 当前着装(即时层,覆盖型) */
   outfit?: string;
-  /** 当前状态/健康(即时层,覆盖型) */
+  /** 当前状态/健康(即时层,覆盖型)。首次记录用此字段;已有非空伤情改用 conditionPatch */
   condition?: string;
+  /** 伤情局部更新(已有非空 condition 时使用;编号 c1/c2 仅本请求有效) */
+  conditionPatch?: ConditionPatch;
+  /** 非空 location 时的本轮正文连续定位短引(仅校验,不存档) */
+  locationEvidence?: string;
   /** 是否「主要角色」(剧情核心主演,永远全量注入) */
   important?: boolean;
   /** 是否随行(随主角移动)。省略=定点;明确随主角同行的同伴填 true */
@@ -606,7 +640,10 @@ export interface ProtagonistDelta {
   identity?: string;
   appearance?: string;
   outfit?: string;
+  /** 首次记录用此字段;已有非空伤情改用 conditionPatch */
   condition?: string;
+  /** 伤情局部更新(已有非空 condition 时使用;编号 c1/c2 仅本请求有效) */
+  conditionPatch?: ConditionPatch;
   lock?: string[];
   unlock?: string[];
   lockedFields?: string[];
@@ -699,6 +736,8 @@ export interface SummaryDelta {
     add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: KnowledgeScope }[];
     /** 按提示词里展示的短 id(p1/p2…)了结,每项带 outcome/reason 说明怎么了结;裸字符串兼容旧格式 */
     resolve?: PlanResolveItem[];
+    /** 同一未了结事项改期/暂缓(短 id);同一编号每楼只做一次 update 或 resolve */
+    update?: PlanUpdateItem[];
   };
   /** 指令型:生活小档案增删改(可选;只记主角或主要角色归属明确、明说过/明文揭示的) */
   lifeDetails?: {
@@ -762,6 +801,8 @@ export interface StoredDelta {
     add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; visibility?: KnowledgeScope }[];
     /** 了结:稳定 plan id(带 outcome/reason);裸字符串兼容旧数据 */
     resolve?: PlanResolveItem[];
+    /** 改期/暂缓:稳定 plan id + 新 content/targetTime;不改 visibility */
+    update?: PlanUpdateItem[];
     /** 内部/手动:删除 plan(稳定 id) */
     remove?: string[];
     /** 内部/手动:重新开启已了结 plan(稳定 id) */

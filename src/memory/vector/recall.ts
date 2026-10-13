@@ -168,9 +168,8 @@ function recallParamFingerprint(
     scopes,
     keepRecent: apiSettings.keepRecent,
     customStripTags: [...apiSettings.customStripTags].sort(),
-    queryRewriteJailbreak: apiSettings.vector.queryRewriteJailbreak,
     queryRewriteMaxTokens: apiSettings.vector.queryRewriteMaxTokens,
-    jailbreakPrompt: apiSettings.vector.queryRewriteJailbreak ? apiSettings.prompts.jailbreak : '',
+    jailbreakPrompt: apiSettings.prompts.jailbreak,
     embedding: endpoint('embedding'),
     rerank: endpoint('rerank'),
     queryRewrite: endpoint('queryRewrite'),
@@ -426,7 +425,6 @@ export async function runVectorRecall(signal?: AbortSignal): Promise<RecallRunRe
       error: e,
       retries: channel.retries | 0,
       stream: null,
-      prefill: null,
     });
     clearRecallInjection();
     return emptyRecallResult(false);

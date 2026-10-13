@@ -4,6 +4,7 @@
  */
 
 import type { KnowledgeScope, MemNpc, NpcDelta, NpcMerge } from './types';
+import { applyConditionPatch, hasConditionPatchContent } from './conditionPatch';
 import { applyNpcAffinity } from './npcRelations';
 
 function isLocked(locked: string[] | undefined, field: string): boolean {
@@ -152,7 +153,12 @@ function applyNpcPlacement(n: MemNpc, src: NpcDelta): void {
 
 function applyNpcState(n: MemNpc, src: NpcDelta): void {
   if (typeof src.outfit === 'string') n.outfit = src.outfit.trim() || undefined;
-  if (typeof src.condition === 'string') n.condition = src.condition.trim() || undefined;
+  // 已有伤情的局部补丁优先:同时给整段 condition 时不先覆盖,避免把未点名的旧伤清掉。
+  if (src.conditionPatch && hasConditionPatchContent(src.conditionPatch)) {
+    n.condition = applyConditionPatch(n.condition, src.conditionPatch);
+  } else if (typeof src.condition === 'string') {
+    n.condition = src.condition.trim() || undefined;
+  }
   if (typeof src.important === 'boolean') n.important = src.important || undefined;
 }
 
@@ -183,6 +189,7 @@ function applyNpcFields(n: MemNpc, src: NpcDelta, storyTime: string, mode: 'fill
   const stateSrc: NpcDelta = { name: src.name };
   if (allow('outfit') && src.outfit !== undefined) stateSrc.outfit = src.outfit;
   if (allow('condition') && src.condition !== undefined) stateSrc.condition = src.condition;
+  if (allow('condition') && src.conditionPatch) stateSrc.conditionPatch = src.conditionPatch;
   if (allow('important') && src.important !== undefined) stateSrc.important = src.important;
   applyNpcState(n, stateSrc);
 

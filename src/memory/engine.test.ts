@@ -5,7 +5,7 @@ import * as context from '@/st/context';
 import type { STContext, STMessage } from '@/st/context';
 import * as notices from '@/st/toast';
 import { batchBackfill, checkResummary, currentSummaryPromise, engineState, handleGenerationIntercept, openingPendingFloor, planBatches, summarizeFloor, summarizeQueue, summarizeSelected } from './engine';
-import { buildBatchThinking, buildResummaryPrompt, buildSummaryThinking, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, RULE_SUMMARY_COMPOSITION, SUMMARY_OUTPUT_PROTOCOL } from './prompts';
+import { buildBatchThinking, buildResummaryPrompt, buildSummaryThinking, RESUMMARY_THINKING_CHECKLIST, RULE_SUMMARY_COMPOSITION, SUMMARY_OUTPUT_PROTOCOL } from './prompts';
 import { renderSourceHints, SOURCE_HINTS_HEADER } from './sourceHints';
 import { markMemorySessionLoaded } from './session';
 import { memory } from './store';
@@ -187,19 +187,18 @@ describe('summary request roles', () => {
     await summarizeFloor(0);
 
     expect(client.requestViaMainApi).toHaveBeenCalledOnce();
-    const tail = vi.mocked(client.requestViaMainApi).mock.calls[0][0].slice(-4);
+    const tail = vi.mocked(client.requestViaMainApi).mock.calls[0][0].slice(-3);
     const thinking = buildSummaryThinking('User');
     expect(tail).toEqual([
-      { role: 'system', content: expect.stringContaining(custom ? '【柏宝书主角档案兼容协议】' : '【物品规则】') },
+      { role: 'system', content: expect.stringContaining(custom ? '【柏宝书主角档案兼容协议】' : 'locationEvidence') },
       { role: 'user', content: expect.stringContaining('The first response.') },
-      { role: 'system', content: thinking.checklist },
-      { role: 'assistant', content: thinking.prefill },
+      { role: 'system', content: thinking },
     ]);
     expect(tail[0].content).not.toContain('The first response.');
     expect(tail[1].content).toContain('[M1-P1] The first response.');
     expect(tail[1].content).not.toContain('═══ 【物品规则】');
     expect(tail[1].content).not.toContain(SOURCE_HINTS_HEADER);
-    expect(tail.map(m => m.content).join('\n').split(RULE_SUMMARY_COMPOSITION)).toHaveLength(custom ? 1 : 2);
+    expect(tail[0].content.includes('【摘要成文顺序】')).toBe(!custom);
     expect(tail.map(m => m.content).join('\n').split(SUMMARY_OUTPUT_PROTOCOL)).toHaveLength(2);
     expect(chat[0].extra?.bbs_leaf?.text).toBe(summary.summary);
   });
@@ -220,7 +219,12 @@ describe('summary request roles', () => {
     } satisfies SummaryDelta;
     const text = 'User entered the Archive, received its vault key and arranged a meeting with Archivist.';
     vi.mocked(client.requestViaMainApi).mockResolvedValue(
-      `<thinking>Key, place, contact and appointment recorded.</thinking>${JSON.stringify({ ...summary, summary: text, ...changes })}`,
+      `<thinking>Key, place, contact and appointment recorded.</thinking>${JSON.stringify({
+        ...summary,
+        summary: text,
+        ...changes,
+        npcs: { add: [{ ...changes.npcs.add[0], locationEvidence: 'stone Archive' }] },
+      })}`,
     );
 
     await summarizeFloor(0);
@@ -256,7 +260,7 @@ describe('summary request roles', () => {
     await summarizeFloor(1);
 
     expect(client.requestViaMainApi).toHaveBeenCalledOnce();
-    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].at(-3)?.content ?? '';
+    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].at(-2)?.content ?? '';
     expect(material).toContain('【用户·User】\n[M1-P1] Start the story.');
     expect(material).toContain([
       '【角色·Character】',
@@ -301,7 +305,7 @@ describe('summary request roles', () => {
     await summarizeFloor(1);
 
     const messages = vi.mocked(client.requestViaMainApi).mock.calls[0][0];
-    const material = messages.at(-3)!.content;
+    const material = messages.at(-2)!.content;
     expect(material.split(SOURCE_HINTS_HEADER)).toHaveLength(2);
     const hints = material.split(SOURCE_HINTS_HEADER)[1];
     const expected = [
@@ -334,7 +338,7 @@ describe('summary request roles', () => {
 
     await summarizeFloor(2);
 
-    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].at(-3)!.content;
+    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].at(-2)!.content;
     const hints = material.split(SOURCE_HINTS_HEADER)[1];
     expect(material).toContain(history);
     expect(hints).toContain(`[M3-P1] ${body}`);
@@ -388,13 +392,12 @@ describe('summary request roles', () => {
     expect(await batchBackfill({ floors: [1, 3] })).toMatchObject({ done: 2, total: 2, cancelled: false });
 
     expect(client.requestViaMainApi).toHaveBeenCalledOnce();
-    const tail = vi.mocked(client.requestViaMainApi).mock.calls[0][0].slice(-4);
+    const tail = vi.mocked(client.requestViaMainApi).mock.calls[0][0].slice(-3);
     const thinking = buildBatchThinking(2);
     expect(tail).toEqual([
       { role: 'system', content: expect.stringContaining('长度必须等于 2') },
       { role: 'user', content: expect.stringContaining('The second response.') },
-      { role: 'system', content: thinking.checklist },
-      { role: 'assistant', content: thinking.prefill },
+      { role: 'system', content: thinking },
     ]);
     expect(tail[0].content).not.toContain('The first response.');
     expect(tail[0].content).toContain(RULE_SUMMARY_COMPOSITION);
@@ -421,7 +424,7 @@ describe('summary request roles', () => {
     expect(await batchBackfill({ floors: [1, 3] })).toMatchObject({ done: 2 });
 
     expect(client.requestViaMainApi).toHaveBeenCalledOnce();
-    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].at(-3)!.content;
+    const material = vi.mocked(client.requestViaMainApi).mock.calls[0][0].at(-2)!.content;
     const [first, second] = material.split('━━ 第 2 楼 ━━');
     expect(first.split(SOURCE_HINTS_HEADER)).toHaveLength(2);
     expect(second.split(SOURCE_HINTS_HEADER)).toHaveLength(2);
@@ -444,7 +447,7 @@ describe('summarizeQueue', () => {
   };
   const channel = {
     id: 'sub', name: '副', url: 'https://api.example.com/v1', key: 'k', model: 'm',
-    temperature: 1, maxTokens: 100, timeoutSec: 30, stream: false, prefill: false,
+    temperature: 1, maxTokens: 100, timeoutSec: 30, stream: false,
     excludeParams: [] as string[], reasoningEffort: '',
   };
 
@@ -555,7 +558,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     return mode === 'automatic' ? checkResummary() : (await summarizeSelected(ids)).made;
   }
 
-  it.each([0, 1, 2])('sends a checklist and prefill, storing only final data (input level=%s)', async level => {
+  it.each([0, 1, 2])('sends a checklist and stores only final data (input level=%s)', async level => {
     const ids = seedInputs(level);
     const finalSummary = 'The confirmed merged facts.';
     // A prefilled completion may omit the opening tag from the returned text.
@@ -566,21 +569,20 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     expect(await compress(ids)).toBe(1);
     expect(client.requestViaMainApi).toHaveBeenCalledOnce();
     const messages = vi.mocked(client.requestViaMainApi).mock.calls[0][0];
-    expect(messages.slice(-4)).toEqual([
+    expect(messages.slice(-3)).toEqual([
       { role: 'system', content: expect.stringContaining('{ "summary":') },
       expect.objectContaining({ role: 'user' }),
       { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
-      { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
     ]);
     const sourceText = level === 0 ? 'An existing summary.' : 'Earlier summary 0.';
-    expect(messages.at(-3)?.content).toContain(sourceText);
-    expect(messages.at(-3)?.content).toContain(`[1] ${sourceText}`);
-    expect(messages.at(-3)?.content).toContain('[2] ');
-    expect(messages.at(-3)?.content).not.toMatch(/\[M\d+-P\d+\]/);
-    expect(messages.at(-4)?.content).not.toContain(sourceText);
-    expect(messages.at(-4)?.content).toContain(RULE_SUMMARY_COMPOSITION);
-    expect(messages.at(-3)?.content).not.toContain('【输出要求】');
-    expect(messages.at(-3)?.content).not.toContain(SOURCE_HINTS_HEADER);
+    expect(messages.at(-2)?.content).toContain(sourceText);
+    expect(messages.at(-2)?.content).toContain(`[1] ${sourceText}`);
+    expect(messages.at(-2)?.content).toContain('[2] ');
+    expect(messages.at(-2)?.content).not.toMatch(/\[M\d+-P\d+\]/);
+    expect(messages.at(-3)?.content).not.toContain(sourceText);
+    expect(messages.at(-3)?.content).toContain('【摘要成文顺序】');
+    expect(messages.at(-2)?.content).not.toContain('【输出要求】');
+    expect(messages.at(-2)?.content).not.toContain(SOURCE_HINTS_HEADER);
     expect(messages.map(m => m.content).join('\n').split(SUMMARY_OUTPUT_PROTOCOL)).toHaveLength(2);
     const saved = memory.summaries.at(-1);
     expect(saved).toMatchObject({ text: finalSummary, level: level + 1, childIds: ids });
@@ -615,15 +617,15 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     expect(await compress(ids)).toBe(1);
 
     const messages = vi.mocked(client.requestViaMainApi).mock.calls[0][0];
-    expect(messages.at(-4)?.content).toBe(expected.system);
-    expect(messages.at(-3)?.content).toBe(expected.user + renderSourceHints(sources));
-    expect(messages.at(-3)?.content.split(SOURCE_HINTS_HEADER)).toHaveLength(2);
-    expect(messages.at(-3)?.content).not.toMatch(/\[M\d+-P\d+\]/);
+    expect(messages.at(-3)?.content).toBe(expected.system);
+    expect(messages.at(-2)?.content).toBe(expected.user + renderSourceHints(sources));
+    expect(messages.at(-2)?.content.split(SOURCE_HINTS_HEADER)).toHaveLength(2);
+    expect(messages.at(-2)?.content).not.toMatch(/\[M\d+-P\d+\]/);
     expect(inputs.map(input => input.text)).toEqual(texts);
     expect(memory.summaries.at(-1)?.text).toBe(summary.summary);
-    expect(messages.at(-2)?.content).toBe(RESUMMARY_THINKING_CHECKLIST);
+    expect(messages.at(-1)?.content).toBe(RESUMMARY_THINKING_CHECKLIST);
     if (custom) {
-      expect(messages.at(-3)?.content).toContain('CUSTOM ');
+      expect(messages.at(-2)?.content).toContain('CUSTOM ');
       expect(settings.apiSettings.prompts.resummary2).toBe('CUSTOM {{content}}\nBUDGET {{target_min}}-{{target_max}}');
     }
   });

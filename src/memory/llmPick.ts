@@ -214,7 +214,6 @@ export async function runSupplementalRecall(): Promise<RecallRunResult> {
       error: e,
       retries: apiSettings.summaryMaxRetries | 0,
       stream: channel ? channel.stream === true : null,
-      prefill: channel ? channel.prefill !== false : null,
     });
     clearLlmPickInjection();
     return { ok: false, text: '', lines: [] };

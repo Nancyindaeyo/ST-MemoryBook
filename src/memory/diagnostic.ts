@@ -11,7 +11,6 @@ export const diagnosticState = reactive({
   stage: '' as DiagnosticStage | '',
   httpStatus: null as number | null,
   stream: null as boolean | null,
-  prefill: null as boolean | null,
   retries: 0,
   dropped: [] as string[],
   message: '',
@@ -40,13 +39,11 @@ export function noteFailure(input: {
   error: unknown;
   retries: number;
   stream: boolean | null;
-  prefill: boolean | null;
 }): void {
   const raw = input.error instanceof Error ? input.error.message : String(input.error ?? '');
   diagnosticState.stage = input.stage;
   diagnosticState.httpStatus = statusOf(input.error);
   diagnosticState.stream = input.stream;
-  diagnosticState.prefill = input.prefill;
   diagnosticState.retries = Math.max(0, input.retries | 0);
   diagnosticState.message = sanitizeDiagnosticMessage(raw);
 }
@@ -67,7 +64,6 @@ export function formatDiagnostic(): string {
     `阶段: ${diagnosticState.stage || '无'}`,
     `HTTP: ${diagnosticState.httpStatus ?? '无'}`,
     `流式: ${flag(diagnosticState.stream)}`,
-    `预填充: ${flag(diagnosticState.prefill)}`,
     `重试: ${diagnosticState.retries}`,
     `丢掉: ${diagnosticState.dropped.length ? diagnosticState.dropped.join('、') : '无'}`,
     `原因: ${diagnosticState.message || '无'}`,
